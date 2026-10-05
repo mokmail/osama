@@ -9,8 +9,9 @@ src-tauri/gen/
 # runtime state (never commit local engine data)
 .osama/
 *.log
-# editors / os
-.DS_Store
+# tools / editors / os
+.hermes/
 .idea/
 .vscode/
+.DS_Store
 *.tsbuildinfo

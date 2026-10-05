@@ -1183,7 +1183,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
           <Badge kind="warn"><AlertTriangle size={11} /> model can't call tools</Badge>
         )}
         {/* Identity: which soul is loaded, which voice is active, how full memory is. */}
-        <IdentityStrip onOpen={(p) => setFocus({ panel: p, n: (focus?.n ?? 0) + 1 })} />
+        <IdentityStrip personality={personality} onOpen={(p) => setFocus({ panel: p, n: (focus?.n ?? 0) + 1 })} />
         <div className="spacer" style={{ flex: 1 }} />
         <Button size="sm" variant="ghost" onClick={newChat} title="Archive this conversation and start a blank one">
           <Plus size={13} /> New chat
@@ -1448,6 +1448,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             onCompactClick={compactNow}
             compacting={compacting}
             lastCompaction={lastCompaction}
+            personality={personality}
+            onPersonality={setPersonality}
+            livePrompt={promptInfo}
           />,
           insightSlot,
         )}

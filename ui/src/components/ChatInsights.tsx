@@ -5,8 +5,8 @@ import {
 } from "lucide-react";
 import { agentApi, type AgentMessagePayload } from "../lib/api";
 import type {
-  AgentTool, BrowseResponse, ContextBreakdown, ContextRequestMessage, MemoryEntry,
-  RemoteSkill, SkillMeta, TodoItem, WorkspacesResponse, WorkspaceCandidate,
+  AgentTool, BrowseResponse, ContextBreakdown, ContextRequestMessage, MemoryEntry, MemoryStats,
+  PromptSection, RemoteSkill, SkillMeta, TodoItem, WorkspacesResponse, WorkspaceCandidate,
 } from "../lib/types";
 import { fileBase } from "../lib/format";
 import type { StoredChat } from "../lib/chatStore";
@@ -35,6 +35,7 @@ export function ChatInsights({
   serverUrl, onServerUrl, apiKey, onApiKey, approvalMode, onApprovalMode,
   history, activeId, onNewChat, onOpenChat, onDeleteChat,
   focus, model, compactMessages, onCompactClick, compacting, lastCompaction,
+  personality, onPersonality, livePrompt,
 }: {
   baseUrl: string;
   agentic: boolean;
@@ -61,6 +62,11 @@ export function ChatInsights({
   onCompactClick?: () => void;
   compacting?: boolean;
   lastCompaction?: { at: number; before: number; after: number; reason: string } | null;
+  /** The active personality overlay. Controlled: the chat owns it and sends it. */
+  personality: string;
+  onPersonality: (v: string) => void;
+  /** The prompt the last turn actually used, as the server assembled it. */
+  livePrompt: { sections: PromptSection[]; chars: number; personality: string; memory: MemoryStats } | null;
 }) {
   const [modal, setModal] = useState<QuickPanelId | null>(null);
 
@@ -103,7 +109,7 @@ export function ChatInsights({
 
       {modal && (
         <Modal title={MODAL_TITLES[modal]} onClose={close}>
-          {modal === "soul" && <SoulModal />}
+          {modal === "soul" && <SoulModal personality={personality} onPersonality={onPersonality} livePrompt={livePrompt} />}
           {modal === "memory" && <MemoryModal />}
           {modal === "skills" && <SkillsModal />}
           {modal === "artifacts" && <ArtifactsModal />}

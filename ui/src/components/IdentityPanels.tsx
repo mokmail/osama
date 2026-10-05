@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, RotateCcw, Save, ShieldAlert, TriangleAlert } from "lucide-react";
 import { agentApi } from "../lib/api";
-import type { BuiltPrompt, MemoryEntry, MemoryOp, MemoryResponse, Personality, PromptSection, SoulReport } from "../lib/types";
+import type { BuiltPrompt, MemoryEntry, MemoryOp, MemoryResponse, MemoryStats, Personality, PromptSection, SoulReport } from "../lib/types";
 
 /**
  * The agent's soul, its personality, and its memory — the parts of the chat
@@ -19,30 +19,38 @@ import type { BuiltPrompt, MemoryEntry, MemoryOp, MemoryResponse, Personality, P
 
 /* ------------------------------------------------------------------- soul */
 
-export function SoulModal() {
+export function SoulModal({
+  personality,
+  onPersonality,
+  livePrompt,
+}: {
+  /** The session's active overlay, owned by the chat. Controlled, not local. */
+  personality: string;
+  onPersonality: (v: string) => void;
+  /** The prompt the last turn actually used, straight from the server. */
+  livePrompt: { sections: PromptSection[]; chars: number; personality: string; memory: MemoryStats } | null;
+}) {
   const [soul, setSoul] = useState<SoulReport | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [note, setNote] = useState("");
-  const [personality, setPersonality] = useState("none");
-  const [prompt, setPrompt] = useState<BuiltPrompt | null>(null);
+  const [preview, setPreview] = useState<BuiltPrompt | null>(null);
   const [showPrompt, setShowPrompt] = useState(false);
 
-  useEffect(() => {
-    let live = true;
+  const pullSoul = useCallback(() => {
     agentApi
       .soul()
       .then((s) => {
-        if (!live) return;
         setSoul(s);
         setDraft(s.text);
       })
       .catch((e) => setError((e as Error).message));
-    return () => {
-      live = false;
-    };
   }, []);
+
+  useEffect(() => {
+    pullSoul();
+  }, [pullSoul]);
 
   // Rebuild the preview whenever the personality changes, so the user sees the
   // overlay they are about to apply rather than a description of it.
@@ -51,13 +59,13 @@ export function SoulModal() {
     agentApi
       .prompt({ personality })
       .then((p) => {
-        if (live) setPrompt(p);
+        if (live) setPreview(p);
       })
       .catch(() => {});
     return () => {
       live = false;
     };
-  }, [personality]);
+  }, [personality, soul]);
 
   async function save() {
     setBusy(true);
@@ -66,6 +74,7 @@ export function SoulModal() {
     try {
       const r = await agentApi.saveSoul(draft);
       setSoul(r.soul);
+      setDraft(r.soul.text);
       setNote(
         r.flagged
           ? `Saved — but the text matched: ${(r.findings ?? []).join(", ")}. Review it if you did not intend that phrasing.`
@@ -95,11 +104,20 @@ export function SoulModal() {
 
   const dirty = soul !== null && draft.trim() !== soul.text.trim();
 
+  // The preview reflects the *current* selection; the live prompt is what the
+  // last turn actually used. When they disagree — the user just switched the
+  // overlay — the preview is the one that answers "what will the model be told
+  // next", so it wins; the divergence is surfaced rather than hidden.
+  const liveStale = livePrompt !== null && livePrompt.personality !== personality;
+  const prompt: PromptView | null = liveStale ? preview : (livePrompt ?? preview);
+  const previewing = liveStale || (livePrompt === null && preview !== null);
+
   return (
     <div className="stack" style={{ gap: 12 }}>
       <div className="modal-note">
         The soul is slot&nbsp;#1 of the system prompt — it <strong>replaces</strong> the default identity rather than adding to it.
-        It lives in <code>{soul?.file ?? "SOUL.md"}</code> and follows the agent into every future session.
+        It lives in <code>{soul?.file ?? "SOUL.md"}</code> and follows the agent into every future session. A personality is an
+        overlay on top of it, for this conversation only.
       </div>
 
       {soul?.flagged && (
@@ -123,7 +141,7 @@ export function SoulModal() {
       <div className="rpsection">identity</div>
       <textarea
         className="input idtext"
-        rows={12}
+        rows={11}
         value={draft}
         spellCheck={false}
         onChange={(e) => setDraft(e.target.value)}
@@ -146,22 +164,35 @@ export function SoulModal() {
       {error && <div className="wspick-error">{error}</div>}
       {note && <div className="idok"><Check size={13} /> {note}</div>}
 
-      <div className="rpsection">personality — a temporary overlay, this session only</div>
+      <div className="rpsection">personality — an overlay for this conversation</div>
       <div className="persgrid">
         {(soul?.personalities ?? []).map((p: Personality) => (
           <button
             key={p.id}
             className={`persbtn ${personality === p.id ? "on" : ""}`}
-            onClick={() => setPersonality(p.id)}
+            onClick={() => onPersonality(p.id)}
             title={p.blurb}
+            aria-pressed={personality === p.id}
           >
-            <span className="persbtn-label">{p.label}</span>
+            <span className="persbtn-label">
+              {p.label}
+              {personality === p.id && <Check size={11} className="persbtn-check" />}
+            </span>
             <span className="persbtn-blurb">{p.blurb}</span>
           </button>
         ))}
       </div>
+      <div className="idhint">
+        {personality === "none"
+          ? "No overlay — the soul alone."
+          : `Active for the next turn. It is layered on top of the soul, never a replacement for it.`}
+      </div>
 
-      <div className="rpsection">what the model is actually told</div>
+      <div className="rpsection">
+        what the model is told
+        {previewing && <span className="idpill" style={{ marginLeft: 8 }}>preview — no turn yet</span>}
+        {liveStale && <span className="idpill warn" style={{ marginLeft: 8 }}>last turn used “{livePrompt?.personality}”</span>}
+      </div>
       <PromptInspector prompt={prompt} expanded={showPrompt} onToggle={() => setShowPrompt((v) => !v)} />
     </div>
   );
@@ -169,7 +200,10 @@ export function SoulModal() {
 
 /* -------------------------------------------------------- prompt inspector */
 
-export function PromptInspector({ prompt, expanded, onToggle }: { prompt: BuiltPrompt | null; expanded: boolean; onToggle: () => void }) {
+/** Either a full assembled prompt (preview) or a live turn's summary (no text). */
+export type PromptView = { sections: PromptSection[]; chars?: number; prompt?: string };
+
+export function PromptInspector({ prompt, expanded, onToggle }: { prompt: PromptView | null; expanded: boolean; onToggle: () => void }) {
   if (!prompt) return <div className="idhint">assembling…</div>;
   const totalTokens = prompt.sections.reduce((n, s) => n + (s.tokens ?? 0), 0);
   return (
@@ -191,9 +225,9 @@ export function PromptInspector({ prompt, expanded, onToggle }: { prompt: BuiltP
       </div>
       <div className="row" style={{ justifyContent: "space-between" }}>
         <span className="idhint">{prompt.sections.length} sections · ~{totalTokens} tokens</span>
-        <button className="btn ghost sm" onClick={onToggle}>{expanded ? "Hide" : "Show"} full prompt</button>
+        {prompt.prompt && <button className="btn ghost sm" onClick={onToggle}>{expanded ? "Hide" : "Show"} full prompt</button>}
       </div>
-      {expanded && <pre className="rpblock idprompt">{prompt.prompt}</pre>}
+      {expanded && prompt.prompt && <pre className="rpblock idprompt">{prompt.prompt}</pre>}
     </>
   );
 }
@@ -411,10 +445,12 @@ function StoreList({
 /* ------------------------------------------------------------- status chip */
 
 /**
- * A compact strip for the chat header: which personality is active and how full
- * the stores are. Deliberately small — it is a signal, not a control surface.
+ * A compact strip for the chat header: which soul is loaded, which voice is
+ * active, and how full memory is. Deliberately small — it is a signal, not a
+ * control surface. It reads the soul and memory live, so a change made by the
+ * agent's own tools shows up without a reload.
  */
-export function IdentityStrip({ onOpen }: { onOpen: (panel: "soul" | "memory") => void }) {
+export function IdentityStrip({ personality, onOpen }: { personality: string; onOpen: (panel: "soul" | "memory") => void }) {
   const [soul, setSoul] = useState<SoulReport | null>(null);
   const [mem, setMem] = useState<MemoryResponse | null>(null);
 
@@ -438,6 +474,9 @@ export function IdentityStrip({ onOpen }: { onOpen: (panel: "soul" | "memory") =
 
   const pressure = Math.max(...(mem?.stats?.fills ?? []).map((f) => f.pressure), 0);
   const hot = pressure > 0.85;
+  // The label comes from the catalog, so a renamed preset shows its own name.
+  const active = (soul?.personalities ?? []).find((p) => p.id === personality);
+  const voice = personality === "none" ? "" : (active?.label ?? personality);
 
   return (
     <div className="idstrip">
@@ -446,6 +485,11 @@ export function IdentityStrip({ onOpen }: { onOpen: (panel: "soul" | "memory") =
         {soul?.source === "file" ? "custom soul" : "default soul"}
         {soul?.flagged && <TriangleAlert size={11} className="idstrip-warn" />}
       </button>
+      {voice && (
+        <button className="idstrip-btn on" onClick={() => onOpen("soul")} title="Personality overlay for this conversation">
+          {voice}
+        </button>
+      )}
       <button className={`idstrip-btn ${hot ? "hot" : ""}`} onClick={() => onOpen("memory")} title="Memory stores">
         {mem?.stats?.total ?? 0} fact(s) · {Math.round(pressure * 100)}%
       </button>

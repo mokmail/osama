@@ -1412,3 +1412,5 @@ kbd {
   cursor: pointer; padding: 0 2px; white-space: nowrap;
 }
 .rpmem-mv:hover { color: var(--accent); }
+.idstrip-btn.on { color: var(--accent); border-color: var(--accent); }
+.persbtn-check { margin-left: 5px; vertical-align: -1px; color: var(--accent); }

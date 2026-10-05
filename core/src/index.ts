@@ -20,6 +20,8 @@ export * from "./skillstore.js";
 export * from "./web.js";
 export * from "./pdf.js";
 export * from "./memory.js";
+export * from "./soul.js";
+export * from "./prompt.js";
 export * from "./compact.js";
 export * from "./workspace.js";
 export * from "./sessions.js";

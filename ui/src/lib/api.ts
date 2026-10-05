@@ -2,6 +2,7 @@ import type {
   AgentEvent,
   AgentToolsResponse,
   BrowseResponse,
+  BuiltPrompt,
   ContextBreakdown,
   ContextRequestMessage,
   DownloadRecord,
@@ -13,7 +14,10 @@ import type {
   LocalModel,
   LoraInspection,
   ManagedProcess,
+  MemoryEntry,
+  MemoryOp,
   MemoryResponse,
+  MemoryStats,
   MetadataEdit,
   ModelCard,
   ReleaseInfo,
@@ -22,6 +26,7 @@ import type {
   SessionMeta,
   SkillMeta,
   SkillStoreResponse,
+  SoulReport,
   StatsSnapshot,
   SystemResponse,
   TodoItem,
@@ -204,6 +209,27 @@ export const agentApi = {
   memory: () => get<MemoryResponse>("/api/agent/memory"),
   todos: () => get<{ todos: TodoItem[] }>("/api/agent/todos"),
 
+  /* ------------------------------------------------- identity (soul) + prompt */
+
+  soul: () => get<SoulReport>("/api/agent/soul"),
+  saveSoul: (text: string) => post<{ ok: boolean; chars: number; flagged?: boolean; findings?: string[]; soul: SoulReport }>("/api/agent/soul", { text }),
+  resetSoul: () => post<{ ok: boolean; soul: SoulReport }>("/api/agent/soul/reset"),
+  /** Assemble the system prompt exactly as the agent would, with its breakdown. */
+  prompt: (opts: { system?: string; personality?: string; memory?: boolean; skills?: boolean; tools?: boolean; clock?: boolean; activeSkills?: string[] } = {}) =>
+    post<BuiltPrompt>("/api/agent/prompt", opts),
+
+  /* ------------------------------------------------------------- memory ops */
+
+  saveMemory: (body: { text: string; target?: "memory" | "user"; scope?: "global" | "workspace"; tags?: string[] }) =>
+    post<{ ok: boolean; entry: MemoryEntry; target: string; used: number; budget: number }>("/api/agent/memory/save", body),
+  replaceMemory: (body: { old_text: string; content: string; target?: "memory" | "user" }) =>
+    post<{ ok: boolean; entry: MemoryEntry; used: number; budget: number }>("/api/agent/memory/replace", body),
+  /** Apply several ops atomically — the consolidation path. */
+  batchMemory: (operations: MemoryOp[]) =>
+    post<{ ok: boolean; applied: string[]; stats: MemoryStats }>("/api/agent/memory/batch", { operations }),
+  forgetMemory: (body: { selector: string; target?: "memory" | "user"; scope?: "global" | "workspace" }) =>
+    post<{ ok: boolean; removed: number; error?: string }>("/api/agent/memory/forget", body),
+
   /* ------------------------------------------------ GGUF metadata editing */
 
   /** The metadata of a file not yet in the library, for the editor form. */
@@ -308,6 +334,8 @@ export async function* streamAgent(
     approval?: "ask" | "auto";
     /** Skills the user activated in the composer — injected into the system prompt. */
     activeSkills?: string[];
+    /** Session personality overlay id (see the Soul panel). */
+    personality?: string;
     maxSteps?: number;
     temperature?: number;
     top_p?: number;

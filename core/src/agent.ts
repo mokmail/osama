@@ -1,12 +1,9 @@
-import { executeTool, executeSchedulerTool, toolSchemas, toolByName, isSchedulerTool, type ToolResult, executeContextTool, isContextTool, QUESTION_TIMEOUT_MS, skillsBlock, type TodoItem } from "./tools.js";
-import { loadSkill } from "./skills.js";
-import { memoryBlock, memoryStats } from "./memory.js";
-import { schedulerBlock } from "./scheduler.js";
-import { workspaceSnapshot } from "./workspace.js";
+import { executeTool, executeSchedulerTool, toolSchemas, toolByName, isSchedulerTool, type ToolResult, executeContextTool, isContextTool, QUESTION_TIMEOUT_MS, type TodoItem } from "./tools.js";
 import { appendEvents } from "./sessions.js";
 import { applyCompaction, planCompaction, summarizationPrompt } from "./compact.js";
 import { type ChatMessage, type Meter, measureContext } from "./context.js";
-import { createSteerQueue, orchestrationBlock, delegateSubagent, type SteerQueue } from "./orchestr.js";
+import { createSteerQueue, delegateSubagent, type SteerQueue } from "./orchestr.js";
+import { buildPrompt, type BuiltPrompt } from "./prompt.js";
 
 /**
  * The agentic loop.
@@ -64,6 +61,19 @@ export type AgentEvent =
   | { type: "final"; text: string; steps: number }
   | { type: "error"; message: string };
 
+/**
+ * Emitted once, before the first model call, with the assembled system prompt's
+ * section breakdown. Lets the UI show the user exactly what the model was told,
+ * and in what order, without re-deriving the prompt.
+ */
+export interface AgentPromptEvent {
+  type: "prompt";
+  personality: string;
+  sections: Array<{ name: string; chars: number; tokens: number | null }>;
+  chars: number;
+  memory: import("./memory.js").MemoryStats;
+}
+
 /** Asked before a mutating command runs. The server implements the UI side. */
 export interface ApprovalPolicy {
   approve(req: { command: string; cwd: string }): Promise<boolean>;
@@ -88,6 +98,19 @@ export interface RunAgentOptions {
   /** Inject the memory block and the skill catalog into the system prompt. */
   injectMemory?: boolean;
   injectSkills?: boolean;
+  /**
+   * Include the identity section (SOUL.md + caller text) as slot #1. On by
+   * default; a caller doing a raw, identity-free completion turns it off.
+   */
+  injectIdentity?: boolean;
+  /** Session personality overlay id (see soul.ts). */
+  personality?: string;
+  /**
+   * Called once, before the first model call, with the assembled prompt and its
+   * section breakdown. Lets the caller surface exactly what the model was told
+   * without re-deriving the prompt.
+   */
+  onPrompt?: (built: BuiltPrompt) => void;
   /**
    * Skills the user explicitly activated in the composer. Their full bodies are
    * injected into the system prompt up front, so the model is already following
@@ -151,66 +174,40 @@ export function accumulateToolCalls(
 export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEvent, void, unknown> {
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
 
-  // Assemble the system prompt from the caller's text plus the two blocks the
-  // context tools depend on: durable memory, and the skill catalog. Both are
-  // compact and constant per turn, so they belong in the prompt rather than in
-  // a tool result the model has to go and fetch.
-  const blocks: string[] = [];
-  if (opts.system?.trim()) blocks.push(opts.system.trim());
-  if (opts.injectMemory !== false) {
-    // Anchor recall on the latest user message, so the facts injected are the
-    // ones relevant to what is being asked right now — not just most-recent.
-    const lastUser = [...opts.history].reverse().find((m) => m.role === "user");
-    const query = typeof lastUser?.content === "string" ? lastUser.content : undefined;
-    const mem = memoryBlock(1200, query);
-    if (mem) blocks.push(`<memory>\nFacts you saved earlier — treat them as already known:\n${mem}\n</memory>`);
-  }
-  if (opts.injectSkills !== false) {
-    const active = (opts.activeSkills ?? []).filter(Boolean).map((s) => String(s).trim()).filter(Boolean);
-    if (active.length) {
-      // The user switched these on: load each body and put it inline. Any skill
-      // the user activated but that cannot be read is named, not silently dropped.
-      const loaded: string[] = [];
-      const missing: string[] = [];
-      for (const id of active) {
-        const sk = loadSkill(id);
-        if (sk && sk.body) {
-          loaded.push(`### ${sk.name || sk.id}\n${sk.body.trim()}`);
-        } else {
-          missing.push(id);
-        }
-      }
-      if (loaded.length) {
-        blocks.push(
-          `<active_skills>\nThe user activated these skills for this conversation. Follow them. When they conflict, the one listed later wins.\n\n${loaded.join("\n\n---\n\n")}\n</active_skills>`,
-        );
-      }
-      if (missing.length) {
-        blocks.push(`<active_skills_note>\nThese activated skills could not be loaded: ${missing.join(", ")}\n</active_skills_note>`);
-      }
-    }
-    const cat = skillsBlock();
-    if (cat && cat !== "(no skills installed)") {
-      blocks.push(`<skills>\nLoad one with load_skill before acting on a task it matches:\n${cat}\n</skills>`);
-    }
-  }
-  // The agent runs inside a workspace and inside a scheduler — tell it which,
-  // so it doesn't waste a round-trip asking. Both blocks are cheap and
-  // constant for the turn.
-  const wsSnap = workspaceSnapshot(600);
-  blocks.push(`<workspace>\nYou are running inside this directory. Read or write files relative to it (or give absolute paths).\n${wsSnap}\n</workspace>`);
-  const sched = schedulerBlock(400);
-  if (sched) blocks.push(`<scheduler>\nRecurring jobs the user has configured. They run automatically against this same agent; use list_jobs / create_job / set_job / delete_job / job_history to manage them, or run_command to trigger one immediately.\n${sched}\n</scheduler>`);
-  const system = blocks.join("\n\n");
-  const tools = toolSchemas();
-  const rulesBlock = tools.length > 0 ? `<working-rules>\n${orchestrationBlock()}\n</working-rules>` : "";
-  const systemFull = [system, rulesBlock].filter(Boolean).join("\n\n");
+  // Assemble the system prompt through the shared builder, so the agent, a
+  // subagent and the UI's prompt inspector all see the same stack in the same
+  // order. Identity (the soul) is slot #1 and REPLACES the default identity —
+  // that is what makes it load-bearing rather than decorative.
+  const lastUser = [...opts.history].reverse().find((m) => m.role === "user");
+  const query = typeof lastUser?.content === "string" ? lastUser.content : undefined;
+  const built = buildPrompt({
+    system: opts.system,
+    personality: opts.personality,
+    identity: opts.injectIdentity !== false,
+    toolRules: true,
+    // The caller can turn memory off (a raw completion), but when it is on the
+    // block is anchored on the current message so recall follows the ask.
+    memory: opts.injectMemory !== false,
+    skills: opts.injectSkills !== false,
+    activeSkills: opts.activeSkills,
+    workspace: true,
+    scheduler: true,
+  });
+
+  const systemFull = built.prompt;
+  // The context tools and the UI want the exact bytes that went in, and the
+  // section breakdown, rather than re-deriving the prompt a second time.
+  opts.onPrompt?.(built);
 
   const messages: AgentMessage[] = [
     ...(systemFull ? [{ role: "system" as const, content: systemFull }] : []),
     ...opts.history,
   ];
+  void query;
   let finalText = "";
+
+  /** The tool schemas are fixed for the run; build them once. */
+  const tools = toolSchemas();
 
   /**
    * Compact when the request would not fit. Runs once before the first model

@@ -102,6 +102,20 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
+  // Seed the soul before serving: the identity slot must never be blank at the
+  // first prompt, and a file the user can see beats an implicit default.
+  try {
+    const file = core.ensureSoulFile();
+    const report = core.soulReport();
+    log.info(`soul: ${report.source} (${report.chars} chars) — ${file}`);
+  } catch (e) {
+    log.warn(`could not prepare the soul: ${(e as Error).message}`);
+  }
+  try {
+    log.info(`workspace: ${core.getWorkspace()}`);
+  } catch {
+    /* a workspace is created on first use */
+  }
   log.info(`Osama engine API listening on http://${HOST}:${PORT}`);
   log.info(`UI bundle: ${fs.existsSync(UI_DIST) ? UI_DIST : "(not built yet — run `npm run build:ui`)"}`);
   log.info(`${routes.length} routes registered`);

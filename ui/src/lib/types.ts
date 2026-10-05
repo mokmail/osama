@@ -348,6 +348,12 @@ export interface AgentToolsResponse {
 /** Events streamed by POST /api/agent, one per line of SSE. */
 export type AgentEvent =
   | { type: "assistant_delta"; text: string }
+  /**
+   * Sent once per turn, before the first model call: the assembled system
+   * prompt's sections, in the order the model received them, plus live memory
+   * fill. Lets the chat show what the agent was actually told.
+   */
+  | { type: "prompt"; personality: string; sections: PromptSection[]; chars: number; memory: MemoryStats }
   | { type: "step"; index: number }
   | { type: "tool_call"; id: string; name: string; args: Record<string, unknown>; raw: string }
   | { type: "tool_result"; id: string; name: string; ok: boolean; summary: string; content: string; durationMs: number }
@@ -485,18 +491,77 @@ export interface MemoryEntry {
   hits: number;
 }
 
-export interface MemoryResponse {
-  entries: MemoryEntry[];
-  block: string;
-  stats?: {
-    total: number;
-    byScope: Record<string, number>;
-    chars: Record<string, number>;
-    budget: Record<string, number>;
-  };
-  budgets: { global: number; workspace: number };
-  used: { global: number; workspace: number };
+/** One store's fill level, as the backend reports it. */
+export interface MemoryFill {
+  target: "memory" | "user";
+  scope: "global" | "workspace";
+  label: string;
+  entries: number;
+  chars: number;
+  budget: number;
+  pressure: number;
 }
+
+export interface MemoryStats {
+  total: number;
+  byScope: Record<string, number>;
+  byTarget: Record<string, number>;
+  chars: Record<string, number>;
+  budget: Record<string, number>;
+  user: { entries: number; chars: number; budget: number; pressure: number };
+  fills: MemoryFill[];
+}
+
+export interface MemoryResponse {
+  /** The agent's own notes. */
+  entries: MemoryEntry[];
+  /** The user profile — a separate store. */
+  user: MemoryEntry[];
+  block: string;
+  stats: MemoryStats;
+  budgets: Record<string, number>;
+  used: Record<string, number>;
+  userBudget: number;
+}
+
+/* ------------------------------------------------------ soul + memory (new) */
+
+export interface Personality {
+  id: string;
+  label: string;
+  blurb: string;
+  overlay: string;
+}
+
+export interface SoulReport {
+  source: "file" | "default";
+  file: string;
+  text: string;
+  chars: number;
+  flagged: boolean;
+  findings: string[];
+  truncated: boolean;
+  personalities: Personality[];
+  maxChars: number;
+}
+
+export interface PromptSection {
+  name: string;
+  chars: number;
+  tokens: number | null;
+}
+
+/** The assembled system prompt, with its section breakdown. */
+export interface BuiltPrompt {
+  prompt: string;
+  sections: PromptSection[];
+  memory: MemoryStats;
+}
+
+export type MemoryOp =
+  | { action: "add"; content: string; target?: "memory" | "user"; scope?: "global" | "workspace"; tags?: string[] }
+  | { action: "replace"; content: string; old_text: string; target?: "memory" | "user" }
+  | { action: "remove"; old_text: string; target?: "memory" | "user" };
 
 export interface TodoItem {
   content: string;

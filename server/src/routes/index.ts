@@ -2,6 +2,7 @@ import * as core from "@osama/core";
 import { agentRoutes } from "./agent.js";
 import { eventRoutes } from "./events.js";
 import { hubRoutes } from "./hub.js";
+import { identityRoutes } from "./identity.js";
 import { modelRoutes } from "./models.js";
 import { skillRoutes } from "./skills.js";
 import { systemRoutes } from "./system.js";
@@ -17,6 +18,7 @@ import type { RouteDeps, RouteModule } from "../http.js";
  */
 export const MODULES: RouteModule[] = [
   systemRoutes,
+  identityRoutes,
   modelRoutes,
   hubRoutes,
   agentRoutes,

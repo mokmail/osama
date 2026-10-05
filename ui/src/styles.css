@@ -1340,3 +1340,75 @@ kbd {
 .metadata-group > summary::-webkit-details-marker { display: none; }
 .metadata-group > summary:hover { color: var(--text); }
 .metadata-group[open] > summary { color: var(--text); margin-bottom: 4px; }
+
+/* ------------------------------------------------------------- identity ---- */
+/* The Soul + Memory panels and the header strip. Tokens only: the app already
+   defines --text, --faint, --border, --card, --accent; the panels must not
+   introduce a second palette or they will not follow the theme. */
+
+.idstrip { display: flex; align-items: center; gap: 4px; }
+.idstrip-btn {
+  display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: transparent;
+  color: var(--faint); font-size: 11px; line-height: 1.4; cursor: pointer;
+}
+.idstrip-btn:hover { color: var(--text); border-color: var(--accent); }
+.idstrip-btn.hot { color: var(--warn, #d08770); border-color: var(--warn, #d08770); }
+.idstrip-dot { width: 6px; height: 6px; border-radius: 999px; background: var(--accent); display: inline-block; }
+.idstrip-warn { color: var(--warn, #d08770); }
+
+.idlabel { font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: .04em; }
+.idpill {
+  font-size: 11px; padding: 2px 7px; border-radius: 999px;
+  border: 1px solid var(--border); color: var(--faint);
+}
+.idpill.on { color: var(--text); border-color: var(--accent); }
+.idpill.warn { color: var(--warn, #d08770); border-color: var(--warn, #d08770); }
+.idhint { font-size: 11px; color: var(--faint); }
+.idtext {
+  width: 100%; font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px; line-height: 1.55; resize: vertical;
+}
+.idwarn, .idok {
+  display: flex; align-items: flex-start; gap: 8px;
+  font-size: 12px; line-height: 1.5; padding: 8px 10px; border-radius: 6px;
+  border: 1px solid var(--border);
+}
+.idwarn { color: var(--warn, #d08770); border-color: color-mix(in srgb, var(--warn, #d08770) 45%, var(--border)); }
+.idok { color: var(--faint); }
+.idprompt { max-height: 340px; overflow: auto; }
+
+/* personality picker */
+.persgrid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.persbtn {
+  display: flex; flex-direction: column; gap: 1px; text-align: left;
+  padding: 7px 9px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--border); background: transparent; color: var(--text);
+}
+.persbtn:hover { border-color: var(--accent); }
+.persbtn.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.persbtn-label { font-size: 12px; font-weight: 600; }
+.persbtn-blurb { font-size: 11px; color: var(--faint); }
+
+/* prompt inspector */
+.prow { display: grid; grid-template-columns: 18px 1fr 90px 62px; align-items: center; gap: 8px; font-size: 11px; }
+.prow-n { color: var(--faint); text-align: right; }
+.prow-name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prow-bar { display: block; height: 4px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.prow-fill { display: block; height: 100%; background: var(--accent); }
+.prow-val { color: var(--faint); text-align: right; }
+
+/* memory store fills */
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.fill { display: block; height: 3px; border-radius: 999px; background: var(--border); overflow: hidden; margin-top: 3px; }
+.fill-bar { display: block; height: 100%; background: var(--accent); }
+.fill.warm .fill-bar { background: var(--warn, #d08770); }
+.fill.hot .fill-bar { background: var(--danger, #bf616a); }
+
+/* memory rows */
+.rpmem-mv {
+  font-size: 10px; color: var(--faint); background: transparent; border: 0;
+  cursor: pointer; padding: 0 2px; white-space: nowrap;
+}
+.rpmem-mv:hover { color: var(--accent); }

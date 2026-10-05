@@ -10,6 +10,7 @@ import type {
 } from "../lib/types";
 import { fileBase } from "../lib/format";
 import type { StoredChat } from "../lib/chatStore";
+import { MemoryModal, SoulModal } from "./IdentityPanels";
 
 /**
  * The chat insights, rendered INTO the app's left sidebar (portal slot).
@@ -26,7 +27,7 @@ export interface FocusSignal {
   n: number;
 }
 
-export type QuickPanelId = "memory" | "skills" | "artifacts" | "workspace" | "scheduler" | "tools" | "settings";
+export type QuickPanelId = "soul" | "memory" | "skills" | "artifacts" | "workspace" | "scheduler" | "tools" | "settings";
 
 export function ChatInsights({
   baseUrl, agentic, todos, refreshKey, messages, onToolSupport, onWorkspaceChange,
@@ -65,7 +66,7 @@ export function ChatInsights({
 
   // A focus request for a quick panel opens its modal (the inline ones scroll).
   useEffect(() => {
-    if (focus && ["memory", "skills", "artifacts", "workspace", "scheduler", "tools", "settings"].includes(focus.panel)) {
+    if (focus && ["soul", "memory", "skills", "artifacts", "workspace", "scheduler", "tools", "settings"].includes(focus.panel)) {
       setModal(focus.panel as QuickPanelId);
     }
   }, [focus]);
@@ -90,17 +91,19 @@ export function ChatInsights({
 
       <div className="nav-group-label">agent</div>
       <div className="qgrid">
+        <QuickBtn id="soul" icon={<Sparkles size={14} />} label="Soul" onClick={setModal} />
         <QuickBtn id="memory" icon={<Brain size={14} />} label="Memory" badge={memCount > 0 ? String(memCount) : undefined} onClick={setModal} />
-        <QuickBtn id="skills" icon={<Sparkles size={14} />} label="Skills" badge={skillsCount > 0 ? String(skillsCount) : undefined} onClick={setModal} />
+        <QuickBtn id="skills" icon={<Wrench size={14} />} label="Skills" badge={skillsCount > 0 ? String(skillsCount) : undefined} onClick={setModal} />
         <QuickBtn id="artifacts" icon={<FileCode2 size={14} />} label="Artifacts" badge={artsCount > 0 ? String(artsCount) : undefined} onClick={setModal} />
         <QuickBtn id="workspace" icon={<FolderOpen size={14} />} label="Workspace" onClick={setModal} />
         <QuickBtn id="scheduler" icon={<CalendarClock size={14} />} label="Scheduler" badge={jobsCount > 0 ? String(jobsCount) : undefined} onClick={setModal} />
-        {agentic && <QuickBtn id="tools" icon={<Wrench size={14} />} label="Tools" onClick={setModal} />}
+        {agentic && <QuickBtn id="tools" icon={<Ruler size={14} />} label="Tools" onClick={setModal} />}
         <QuickBtn id="settings" icon={<Settings2 size={14} />} label="Settings" onClick={setModal} />
       </div>
 
       {modal && (
         <Modal title={MODAL_TITLES[modal]} onClose={close}>
+          {modal === "soul" && <SoulModal />}
           {modal === "memory" && <MemoryModal />}
           {modal === "skills" && <SkillsModal />}
           {modal === "artifacts" && <ArtifactsModal />}
@@ -125,6 +128,7 @@ export function ChatInsights({
 }
 
 const MODAL_TITLES: Record<QuickPanelId, string> = {
+  soul: "soul & personality",
   memory: "memory",
   skills: "skills",
   artifacts: "artifacts",
@@ -339,121 +343,6 @@ function ContextPanel({ baseUrl, agentic, todos, refreshKey, messages, onToolSup
         </>
       )}
     </Panel>
-  );
-}
-
-/* ------------------------------------------------------------ memory */
-
-function MemoryModal() {
-  const [mem, setMem] = useState<{ entries: MemoryEntry[]; block?: string; stats?: { total: number; chars: Record<string, number>; budget: Record<string, number> } } | null>(null);
-  const [draft, setDraft] = useState("");
-  const [draftScope, setDraftScope] = useState<"global" | "workspace">("global");
-  const [draftTags, setDraftTags] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  const pull = () => agentApi.memory().then((m) => setMem(m as never)).catch(() => {});
-  useEffect(() => { pull(); }, []);
-
-  async function forget(id: string) {
-    try {
-      const r = await fetch("/api/agent/memory/forget", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ selector: id }),
-      });
-      if (!r.ok) throw new Error(`forget failed: HTTP ${r.status}`);
-      setMem((await agentApi.memory()) as never);
-    } catch { /* refresh raced the write */ }
-  }
-
-  async function save() {
-    const text = draft.trim();
-    if (!text) return;
-    setBusy(true);
-    setError("");
-    try {
-      const r = await fetch("/api/agent/memory/save", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text, scope: draftScope, tags: draftTags.split(",").map((t) => t.trim()).filter(Boolean) }),
-      });
-      if (!r.ok) {
-        const b = await r.json().catch(() => ({}) as { error?: string });
-        throw new Error(b.error ?? `save failed: HTTP ${r.status}`);
-      }
-      setDraft("");
-      setDraftTags("");
-      setMem((await agentApi.memory()) as never);
-    } catch (e) {
-      setError((e as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const total = mem?.stats?.total ?? mem?.entries.length ?? 0;
-  const g = mem?.stats;
-  return (
-    <div className="stack" style={{ gap: 12 }}>
-      <div className="modal-note">
-        Facts the agent keeps between turns — injected into every agentic turn's system prompt.
-        &ldquo;global&rdquo; applies everywhere; &ldquo;workspace&rdquo; only inside the current workspace.
-      </div>
-
-      <div className="grid-2">
-        <div className="stat"><span className="l">global</span><span className="n">{g ? `${g.chars.global}/${g.budget.global} chars` : "—"}</span></div>
-        <div className="stat"><span className="l">workspace</span><span className="n">{g ? `${g.chars.workspace}/${g.budget.workspace} chars` : "—"}</span></div>
-      </div>
-
-      <div className="rpsection">add a fact</div>
-      <div className="wspick-custom">
-        <input
-          className="input"
-          placeholder="e.g. deployment needs two retries after a fresh reboot"
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); save(); } }}
-          disabled={busy}
-        />
-        <button className="btn ghost sm" onClick={save} disabled={busy || !draft.trim()}>Save</button>
-      </div>
-      <div className="row wrap" style={{ gap: 8 }}>
-        <label className="check">
-          <input type="radio" checked={draftScope === "global"} onChange={() => setDraftScope("global")} /> global
-        </label>
-        <label className="check">
-          <input type="radio" checked={draftScope === "workspace"} onChange={() => setDraftScope("workspace")} /> workspace
-        </label>
-        <input
-          className="input" style={{ maxWidth: 220 }}
-          placeholder="tags (comma-separated)"
-          value={draftTags}
-          onChange={(e) => setDraftTags(e.target.value)}
-        />
-      </div>
-      {error && <div className="wspick-error">{error}</div>}
-
-      <div className="rpsection">{total} saved</div>
-      {total === 0 ? (
-        <Empty text="nothing saved yet — the agent adds facts with save_memory when it learns something durable" />
-      ) : (
-        mem!.entries.map((e) => (
-          <div className="rpmem" key={e.id}>
-            <span className="rpmem-text" title={`${e.createdAt} · ${e.hits} recalls`}>{e.text}</span>
-            {e.scope === "workspace" && <span className="rptag">ws</span>}
-            <button className="rpmem-x" onClick={() => forget(e.id)} title="Forget this">×</button>
-          </div>
-        ))
-      )}
-
-      {mem?.block ? (
-        <>
-          <div className="rpsection">injected into the system prompt</div>
-          <pre className="rpblock">{mem.block}</pre>
-        </>
-      ) : null}
-    </div>
   );
 }
 

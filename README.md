@@ -62,12 +62,44 @@ The routes live in `server/src/routes/` (one module per area, wired in
 
 ## Agentic mode
 
-Turned on per chat session. 23 tools: files, shell, web (search/fetch/crawl/raw HTTP/download), memory, skills (load/list/create/install), todos, sessions, context. The server runs the loop: model request → tool
+Turned on per chat session. 31 tools: files, shell, web (search/fetch/crawl/raw HTTP/download), memory, soul, skills (load/list/create/install), todos, sessions, jobs, context. The server runs the loop: model request → tool
 calls → execution → results fed back, streamed over SSE and rendered as a
 collapsible trace in the transcript (12-step cap). Filesystem tools are jailed
 to the chosen workspace plus Osama's own home; any shell command needs explicit
 approval (`ask` mode is the default). Context, memory, skills and artifacts are
 live in the right-hand sidebar.
+
+## The agent's soul and memory
+
+The chat page is an agent, not a text box. Two pieces make that explicit, and
+both are inspectable rather than implicit:
+
+**The soul** (`SOUL.md`, in the app home) is slot #1 of the system prompt and
+**replaces** the default identity instead of adding to it — that is what makes
+it load-bearing. It is seeded on first boot, editable from the Soul panel (or by
+the agent's own `update_soul` tool), and a prompt-injection hit is reported as a
+warning rather than silently loaded. A **personality** is the session-level
+overlay Hermes calls `/personality`: a temporary mode shift layered on the
+durable soul, chosen per conversation.
+
+**Memory** is two stores, because the split is the useful part:
+
+| store | holds | scope |
+|---|---|---|
+| agent notes | environment facts, conventions, lessons | global **and per-workspace** |
+| user profile | who the user is, how they want to be answered | always global |
+
+Both are bounded, and a write that would overflow **refuses** with the current
+entries so the agent consolidates in the same turn. Consolidation is atomic:
+`update_memory` applies additions, replacements and removals as one operation, so
+a full store can be pruned and refilled without a half-applied edit destroying a
+fact. The rendered block reports its own fill level, so the model can see it is
+at 90% before it is full.
+
+The **prompt inspector** (Soul panel) assembles the system prompt exactly as the
+agent would — identity → tool rules → memory → skills → workspace → scheduler —
+and shows each section's weight. `GET /api/agent/soul`, `GET|POST
+/api/agent/prompt`, and `GET /api/agent/memory` back the panels.
 
 ## Development
 

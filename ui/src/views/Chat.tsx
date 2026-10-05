@@ -5,10 +5,11 @@ import {
   Paperclip, Pencil, Play, RefreshCw, RotateCcw, Send, Sparkles, StopCircle, Trash2, User, X, AlertTriangle, Plus,
 } from "lucide-react";
 import { api, streamChat, streamAgent, agentApi, type AgentMessagePayload } from "../lib/api";
-import type { AgentQuestion, AgentStep, AgentTool, ContextBreakdown, LocalModel, ManagedProcess, SkillMeta, SystemResponse, TodoItem, WorkspaceFile } from "../lib/types";
+import type { AgentQuestion, AgentStep, AgentTool, ContextBreakdown, LocalModel, ManagedProcess, MemoryStats, PromptSection, SkillMeta, SystemResponse, TodoItem, WorkspaceFile } from "../lib/types";
 import { Badge, Button, Empty, Spinner, useToast } from "../components/ui";
 import { AgentTrace, ApprovalPrompt, QuestionPrompt } from "../components/AgentTrace";
 import { ChatInsights, type FocusSignal } from "../components/ChatInsights";
+import { IdentityStrip } from "../components/IdentityPanels";
 import { RichContent } from "../components/rich";
 import { ModelLoading, useServerReady, useLoadFailure, FailedLoad } from "../components/ModelLoading";
 import { bytes, fileBase } from "../lib/format";
@@ -43,6 +44,26 @@ const DEFAULT_SYSTEM = "You are a helpful, precise assistant running fully offli
 
 /** Active skills persist across reloads, like the model choice. */
 const ACTIVE_SKILLS_KEY = "osama.chat.skills";
+const PERSONALITY_KEY = "osama.chat.personality";
+
+/**
+ * The chosen personality overlay, persisted like the active skills are: it is a
+ * session-level choice, so it outlives a reload but is not part of the soul.
+ */
+function loadPersonality(): string {
+  try {
+    return localStorage.getItem(PERSONALITY_KEY) || "none";
+  } catch {
+    return "none";
+  }
+}
+function savePersonality(id: string): void {
+  try {
+    localStorage.setItem(PERSONALITY_KEY, id);
+  } catch {
+    /* storage full */
+  }
+}
 function loadActiveSkills(): string[] {
   try {
     const raw = JSON.parse(localStorage.getItem(ACTIVE_SKILLS_KEY) ?? "[]");
@@ -424,6 +445,17 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   // ---- active skills: switch skills on for this conversation -----------------
   // Several may be active at once; each is injected into the system prompt by
   // the server, so the model is already following them without a load_skill hop.
+  // ---- identity: which voice the agent speaks with this session ------------
+  // The soul lives on the server; this is only the session's chosen overlay, so
+  // it survives a reload the same way the active skills do.
+  const [personality, setPersonality] = useState<string>(loadPersonality());
+  const [promptInfo, setPromptInfo] = useState<{ sections: PromptSection[]; chars: number; personality: string; memory: MemoryStats } | null>(null);
+
+  // Persist the personality overlay the way the active skills are persisted.
+  useEffect(() => {
+    savePersonality(personality);
+  }, [personality]);
+
   const [editing, setEditing] = useState<{ index: number; text: string } | null>(null);
   const [skills, setSkills] = useState<SkillMeta[]>([]);
   const [activeSkills, setActiveSkills] = useState<string[]>(loadActiveSkills());
@@ -630,6 +662,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
           apiKey: apiKey || undefined,
           model: "local",
           system: systemPrompt.trim() || undefined,
+          personality,
           messages: payloadMessages as never,
           approval: approvalMode,
           activeSkills,
@@ -640,6 +673,12 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         { signal: ac.signal },
       )) {
         switch (ev.type) {
+          case "prompt":
+            // The server assembled the prompt for this turn — record what the
+            // model was actually told, so it can be inspected from the chat.
+            setPromptInfo({ sections: ev.sections, chars: ev.chars, personality: ev.personality, memory: ev.memory });
+            break;
+
           case "assistant_delta":
             acc += ev.text;
             patch((m) => ({ ...m, content: acc }));
@@ -1143,6 +1182,8 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         {agentic && toolSupport === "none" && (
           <Badge kind="warn"><AlertTriangle size={11} /> model can't call tools</Badge>
         )}
+        {/* Identity: which soul is loaded, which voice is active, how full memory is. */}
+        <IdentityStrip onOpen={(p) => setFocus({ panel: p, n: (focus?.n ?? 0) + 1 })} />
         <div className="spacer" style={{ flex: 1 }} />
         <Button size="sm" variant="ghost" onClick={newChat} title="Archive this conversation and start a blank one">
           <Plus size={13} /> New chat

@@ -556,11 +556,17 @@ export const agentRoutes: RouteModule = (deps) => {
         const sessionId = core.newSessionId();
         appendUserMessage(sessionId, workspace, history, body.system);
 
+        // The prompt is assembled inside the loop; surface its section breakdown
+        // to the client so the user can see exactly what the model was told.
+        const personality = typeof body.personality === "string" ? body.personality : undefined;
+        let announced = false;
+
         for await (const ev of core.runAgent({
           transport: openaiTransport({ base, apiKey }),
           model,
           history,
           system: typeof body.system === "string" ? body.system : undefined,
+          personality,
           workspace,
           maxSteps: Number.isFinite(body.maxSteps) ? Number(body.maxSteps) : undefined,
           approval,
@@ -579,6 +585,17 @@ export const agentRoutes: RouteModule = (deps) => {
           web: { search: webSearch, fetch: webFetch },
           steer,
           allowDelegate: body.delegate !== false && approvalMode === "auto",
+          onPrompt: (built) => {
+            if (announced) return;
+            announced = true;
+            sseSend(res, {
+              type: "prompt",
+              personality: personality ?? "none",
+              sections: built.sections,
+              chars: built.prompt.length,
+              memory: built.memory,
+            });
+          },
           compactApprove: async (info) =>
             requestApproval({ command: `compact ${info.older} older message(s)`, cwd: workspace }, approvalMode, res, ac.signal),
         })) {

@@ -4,7 +4,8 @@ import { osamaHome, REPO_ROOT } from "./paths.js";
 import { getWorkspace } from "./workspace.js";
 import { describeBreakdown, measureContext, type ChatMessage, type Meter } from "./context.js";
 import { discoverSkills, loadSkill, skillCatalog, skillRoots } from "./skills.js";
-import { forgetMemory, markRecalled, memoryBlock, memoryStats, recallMemory, saveMemory } from "./memory.js";
+import { applyMemoryOps, forgetMemory, inferTarget, listAll, listUser, markRecalled, memoryBlock, memoryStats, recallMemory, saveMemory } from "./memory.js";
+import { writeSoul } from "./soul.js";
 import { listSessions, readSession } from "./sessions.js";
 import { crawl, downloadTo, httpRequest, type CrawlPage } from "./web.js";
 import {
@@ -293,36 +294,89 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
     name: "save_memory",
     description:
       "Save a durable fact to remember across sessions — a stable preference, a decision, a constraint, an environment fact. "
-      + "Use it when something will still matter later, not for task progress.",
+      + "Use it when something will still matter later, not for task progress. "
+      + "target 'user' is for facts about the person (their preferences, style, expectations); 'memory' is for your own notes "
+      + "(environment, conventions, lessons). When a store is full the write is refused with the current entries so you can consolidate.",
     mutating: true,
     parameters: {
       type: "object",
       properties: {
         text: { type: "string", description: "The fact, written as a short declarative sentence." },
-        scope: { type: "string", enum: ["global", "workspace"], description: "global by default." },
+        target: { type: "string", enum: ["memory", "user"], description: "Which store. Defaults to 'memory'." },
+        scope: { type: "string", enum: ["global", "workspace"], description: "For the memory store; the user profile is always global." },
         tags: { type: "array", items: { type: "string" }, description: "Optional keywords for recall." },
       },
       required: ["text"],
     },
   },
   {
+    name: "update_memory",
+    description:
+      "Change several memories at once, atomically: add, replace and remove in one call. "
+      + "Use this to consolidate a nearly-full store — the removals and the additions land together, or nothing does, "
+      + "so you can never lose a fact to a half-applied edit. "
+      + "For replace/remove, old_text is a unique substring of the entry to change.",
+    mutating: true,
+    parameters: {
+      type: "object",
+      properties: {
+        operations: {
+          type: "array",
+          description: "The ops, applied in order.",
+          items: {
+            type: "object",
+            properties: {
+              action: { type: "string", enum: ["add", "replace", "remove"] },
+              target: { type: "string", enum: ["memory", "user"], description: "Default 'memory'." },
+              scope: { type: "string", enum: ["global", "workspace"] },
+              content: { type: "string", description: "add/replace: the new text." },
+              old_text: { type: "string", description: "replace/remove: a unique substring of the target entry." },
+              tags: { type: "array", items: { type: "string" } },
+            },
+            required: ["action"],
+          },
+        },
+      },
+      required: ["operations"],
+    },
+  },
+  {
+    name: "update_soul",
+    description:
+      "Rewrite your own identity — the SOUL.md that occupies slot #1 of your system prompt and defines who you are and how you speak. "
+      + "Use it when the user asks you to change your personality, voice or default manner, and only then: this is durable identity, not a "
+      + "per-task instruction (that belongs in the chat's system prompt or a skill). It persists across every future session.",
+    mutating: true,
+    parameters: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "The complete new soul. Markdown. Focus on identity, tone and style — not project instructions." },
+      },
+      required: ["text"],
+    },
+  },
+  {
     name: "recall_memory",
-    description: "Search the saved memories by keyword. With no query, returns everything, most-used first.",
+    description: "Search saved memories and the user profile by keyword. With no query, returns everything, most-used first.",
     mutating: false,
     parameters: {
       type: "object",
-      properties: { query: { type: "string", description: "Keywords to look for." } },
+      properties: {
+        query: { type: "string", description: "Keywords to look for." },
+        target: { type: "string", enum: ["memory", "user"], description: "Restrict to one store." },
+      },
       required: [],
     },
   },
   {
     name: "forget_memory",
-    description: "Delete a saved memory by id or by matching text. Pass 'all' to clear the store.",
+    description: "Delete a saved memory by id or by matching text. Pass 'all' to clear a store.",
     mutating: true,
     parameters: {
       type: "object",
       properties: {
         selector: { type: "string", description: "An entry id, a substring of its text, or 'all'." },
+        target: { type: "string", enum: ["memory", "user"], description: "Restrict to one store." },
         scope: { type: "string", enum: ["global", "workspace"] },
       },
       required: ["selector"],
@@ -661,7 +715,7 @@ export interface WebAccess {
 
 const TOOL_CONTEXT_TOOLS = new Set([
   "write_todo", "load_skill", "list_skills",
-  "save_memory", "recall_memory", "forget_memory", "context_status",
+  "save_memory", "update_memory", "update_soul", "recall_memory", "forget_memory", "context_status",
   "ask_user_question", "session_search", "session_events",
   "delegate_task",
   // scheduler tools live in their own dispatcher (executeSchedulerTool)
@@ -742,33 +796,94 @@ export async function executeContextTool(
 
       case "save_memory": {
         // Workspace facts default to the workspace scope (they describe where
-        // the agent is working); an explicit scope always wins.
+        // the agent is working); an explicit scope always wins. Facts about the
+        // *person* belong in the profile, not in the agent's own notes.
         const text = String(args.text ?? "");
+        const explicitTarget = args.target === "user" ? "user" : args.target === "memory" ? "memory" : undefined;
+        const target = explicitTarget ?? inferTarget(text);
         const wantsWorkspace =
           args.scope === "workspace" ||
           (!args.scope && /\b(here|this (workspace|project|repo|folder|directory)|current (workspace|project))\b/i.test(text));
         const scope = wantsWorkspace ? "workspace" : "global";
         const tags = Array.isArray(args.tags) ? (args.tags as unknown[]).map(String) : [];
-        const r = saveMemory(text, scope, tags);
-        if (!r.ok) return { ok: false, content: r.error ?? "could not save", summary: "refused" };
+        const r = saveMemory(text, scope, tags, target);
+        if (!r.ok) {
+          // Report the fill so the model can consolidate in the same turn
+          // rather than retrying blindly against a store that cannot fit it.
+          const stats = memoryStats();
+          const store = target === "user" ? stats.user : { chars: stats.chars[scope] ?? 0, budget: stats.budget[scope] ?? 0, entries: stats.byScope[scope] ?? 0, pressure: 0 };
+          const current = listAll(target, scope).map((e) => e.text);
+          return {
+            ok: false,
+            content: `${r.error}\n\nCurrent entries:\n${current.map((t) => `- ${t}`).join("\n") || "(none)"}\n\nFree room in this same turn with update_memory (remove/replace + add together), then the new fact will fit.`,
+            summary: `refused — ${store.chars ?? 0}/${store.budget ?? 0} chars used`,
+          };
+        }
         return {
           ok: true,
-          content: `saved to ${scope} memory (${r.used}/${r.budget} chars used there)`,
+          content: `saved to ${target === "user" ? "the user profile" : `${scope} memory`} (${r.used}/${r.budget} chars used there)`,
           summary: `remembered: ${String(args.text ?? "").slice(0, 60)}`,
         };
       }
 
+      case "update_memory": {
+        const ops = Array.isArray(args.operations) ? (args.operations as Record<string, unknown>[]) : [];
+        if (!ops.length) return { ok: false, content: "operations must be a non-empty list", summary: "empty ops" };
+        const r = applyMemoryOps(
+          ops.map((o) => ({
+            action: String(o.action ?? "add") as "add" | "replace" | "remove",
+            target: o.target === "user" ? "user" : o.target === "memory" ? "memory" : undefined,
+            scope: o.scope === "workspace" ? "workspace" : o.scope === "global" ? "global" : undefined,
+            content: o.content === undefined ? undefined : String(o.content),
+            old_text: o.old_text === undefined ? undefined : String(o.old_text),
+            tags: Array.isArray(o.tags) ? (o.tags as unknown[]).map(String) : undefined,
+          })),
+        );
+        if (!r.ok) {
+          return {
+            ok: false,
+            content: `${r.error}\n\n${r.applied.length ? `Applied before the failure (nothing was written):\n${r.applied.join("\n")}` : "Nothing was written."}`,
+            summary: "batch refused",
+          };
+        }
+        const stats = memoryStats();
+        return {
+          ok: true,
+          content:
+            `${r.applied.join("\n")}\n\nNow: memory ${stats.chars.global ?? 0}/${stats.budget.global ?? 0}, ` +
+            `workspace ${stats.chars.workspace ?? 0}/${stats.budget.workspace ?? 0}, user ${stats.user.chars}/${stats.user.budget} chars.`,
+          summary: `${r.applied.length} op(s) applied`,
+        };
+      }
+
+      case "update_soul": {
+        const text = String(args.text ?? "").trim();
+        if (!text) return { ok: false, content: "text is required", summary: "empty soul" };
+        const r = writeSoul(text);
+        if (!r.ok) return { ok: false, content: r.error ?? "could not write the soul", summary: "refused" };
+        const warn = r.flagged
+          ? `\n\nNote: the text matched prompt-injection heuristic(s): ${r.findings?.join(", ")}. It was saved — review it if you did not intend that phrasing.`
+          : "";
+        return {
+          ok: true,
+          content: `your identity was updated (${r.chars} chars). It takes effect from the next turn — the running conversation keeps the soul it started with, because the system prompt is captured once per session.${warn}`,
+          summary: `soul updated (${r.chars} chars)`,
+        };
+      }
+
       case "recall_memory": {
-        const q = String(args.query ?? "");
-        const hits = recallMemory(q);
+        const query = String(args.query ?? "");
+        const target = args.target === "user" ? "user" : args.target === "memory" ? "memory" : undefined;
+        const hits = recallMemory(query).filter((h) => !target || (target === "user" ? listUser().some((u) => u.id === h.id) : !listUser().some((u) => u.id === h.id)));
         if (!hits.length) {
-          return { ok: true, content: q ? `(nothing matched "${q}")` : "(memory is empty)", summary: "0 hits" };
+          return { ok: true, content: query ? `(nothing matched "${query}")` : "(memory is empty)", summary: "0 hits" };
         }
         markRecalled(hits.map((h) => h.id));
+        const isUser = new Set(listUser().map((u) => u.id));
         return {
           ok: true,
           content: hits
-            .map((h) => `${h.id}${h.scope === "workspace" ? " [workspace]" : ""}: ${h.text}`)
+            .map((h) => `${h.id}${isUser.has(h.id) ? " [user]" : h.scope === "workspace" ? " [workspace]" : ""}: ${h.text}`)
             .join("\n"),
           summary: `${hits.length} hit(s)`,
         };
@@ -776,7 +891,8 @@ export async function executeContextTool(
 
       case "forget_memory": {
         const scope = args.scope === "workspace" ? "workspace" : args.scope === "global" ? "global" : undefined;
-        const r = forgetMemory(String(args.selector ?? ""), scope);
+        const target = args.target === "user" ? "user" : args.target === "memory" ? "memory" : undefined;
+        const r = forgetMemory(String(args.selector ?? ""), scope, target);
         return { ok: r.ok, content: r.ok ? `removed ${r.removed} entr(y/ies)` : (r.error ?? "nothing removed"), summary: r.ok ? `${r.removed} removed` : "no match" };
       }
 

@@ -1,0 +1,41 @@
+{
+  "name": "osama",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Osama — a modern GUI for installing and using llama.cpp (run, serve, download, quantize, benchmark).",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "core",
+    "server",
+    "ui"
+  ],
+  "engines": {
+    "node": ">=20.10"
+  },
+  "scripts": {
+    "build:core": "npm run build -w @osama/core",
+    "build:ui": "npm run build -w @osama/ui",
+    "build": "npm run build:core && npm run build:ui && npm run build:server",
+    "build:server": "npm run build -w @osama/server",
+    "dev": "concurrently -k -n engine,ui -c magenta,cyan \"npm:dev:server\" \"npm:dev:ui\"",
+    "dev:server": "npm run dev -w @osama/server",
+    "dev:ui": "npm run dev -w @osama/ui",
+    "start": "node scripts/prestart.mjs && node server/dist/index.js",
+    "typecheck": "npm run typecheck -w @osama/core && npm run typecheck -w @osama/server && npm run typecheck -w @osama/ui",
+    "lint": "npm run typecheck",
+    "osama": "node scripts/osama.mjs",
+    "smoke": "node scripts/prestart.mjs && node scripts/smoke.mjs",
+    "shots": "node scripts/shot.mjs",
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build",
+    "desktop": "npm run build && tauri dev"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "concurrently": "^9.1.0",
+    "playwright": "^1.62.0",
+    "typescript": "^5.7.2"
+  }
+}

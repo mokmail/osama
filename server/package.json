@@ -1,0 +1,22 @@
+{
+  "name": "@osama/server",
+  "version": "0.1.0",
+  "description": "Osama's local engine API — a thin HTTP/SSE layer over @osama/core.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": { "osama-server": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@osama/core": "*"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

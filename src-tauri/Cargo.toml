@@ -1,0 +1,33 @@
+[package]
+name = "osama"
+version = "0.1.0"
+description = "Osama — install and run llama.cpp from a modern GUI"
+authors = ["Mohammed Kmail"]
+edition = "2021"
+rust-version = "1.77"
+default-run = "osama"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+directories = "5"
+
+[features]
+# this feature is used for production builds where `devUrl` points to the
+# filesystem rather than a dev server.
+custom-protocol = ["tauri/custom-protocol"]
+
+[profile.release]
+panic = "abort"
+codegen-units = 1
+lto = true
+opt-level = "s"
+strip = true

@@ -1,0 +1,16 @@
+# deps
+node_modules/
+# builds
+dist/
+ui/dist/
+# tauri
+src-tauri/target/
+src-tauri/gen/
+# runtime state (never commit local engine data)
+.osama/
+*.log
+# editors / os
+.DS_Store
+.idea/
+.vscode/
+*.tsbuildinfo

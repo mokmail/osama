@@ -1,0 +1,513 @@
+// Shared types mirroring @osama/core's public shapes (kept UI-side so the
+// desktop bundle has no dependency on the node-only core package).
+
+export interface GpuProbe {
+  vendor: string;
+  name: string;
+  acceleration: string;
+  discrete: boolean;
+}
+
+export interface SystemInfo {
+  os: "macos" | "linux" | "windows";
+  arch: "arm64" | "x64" | "unknown";
+  platform: string;
+  release: string;
+  hostname: string;
+  cpus: number;
+  cpuModel: string;
+  totalMemBytes: number;
+  freeMemBytes: number;
+  gpu: string;
+}
+
+export interface SystemResponse {
+  system: SystemInfo;
+  gpu: GpuProbe;
+  accelerations: string[];
+  recommendedAcceleration: string;
+  paths: Record<string, string>;
+}
+
+export interface ModelCard {
+  architecture?: string;
+  name?: string;
+  contextLength?: number;
+  embeddingLength?: number;
+  parameterCount?: number;
+  quantization?: string;
+  fileType?: number;
+  tokenizerModel?: string;
+  chatTemplate?: boolean;
+}
+
+export interface LocalModel {
+  id: string;
+  name: string;
+  file: string;
+  sizeBytes: number;
+  repo?: string;
+  card?: ModelCard;
+  addedAt: string;
+  external?: boolean;
+  missing?: boolean;
+  /** true when the GGUF is a speculative-decoding draft head and must not be served as a main model */
+  draftOnly?: boolean;
+}
+
+export interface InstalledEngine {
+  tag: string;
+  os: string;
+  arch: string;
+  acceleration: string;
+  dir: string;
+  installedAt: string;
+  tools: Record<string, string>;
+}
+
+export interface ReleaseAsset {
+  name: string;
+  size: number;
+  browser_download_url: string;
+}
+
+export interface ReleaseInfo {
+  tag: string;
+  name: string;
+  publishedAt: string;
+  htmlUrl: string;
+  assets: ReleaseAsset[];
+}
+
+export interface EnginePlan {
+  tag: string;
+  publishedAt: string;
+  os: string;
+  arch: string;
+  variants: Array<{ acceleration: string; asset: string; size: number; available: boolean }>;
+}
+
+export interface ParamSpec {
+  key: string;
+  flag: string;
+  aliases?: string[];
+  type: "bool" | "string" | "number" | "enum" | "path" | "model";
+  label: string;
+  help?: string;
+  group: string;
+  default?: string | number | boolean;
+  enum?: string[];
+  positional?: boolean;
+  order?: number;
+  unit?: string;
+  advanced?: boolean;
+}
+
+export interface ToolSpec {
+  id: string;
+  binary: string;
+  title: string;
+  summary: string;
+  group: string;
+  mode: "process" | "oneshot";
+  params: ParamSpec[];
+}
+
+export interface HubModel {
+  id: string;
+  /** which hub this came from ("huggingface" legacy rows may omit it) */
+  source?: "huggingface" | "modelscope" | "civitai" | "ollama" | "url";
+  author?: string;
+  downloads?: number;
+  likes?: number;
+  lastModified?: string;
+  tags: string[];
+  pipelineTag?: string;
+  gated?: boolean | string;
+  instruct: boolean;
+  url: string;
+}
+
+export interface HubFile {
+  path: string;
+  size: number;
+  isMain: boolean;
+  quant?: string;
+  isMmproj: boolean;
+}
+
+export interface HubRepo {
+  id: string;
+  /** the hub the repo belongs to */
+  source?: "huggingface" | "modelscope" | "civitai" | "ollama" | "url";
+  /** the source-native ref (== id for HF; the file path for direct URLs) */
+  ref?: string;
+  downloads?: number;
+  likes?: number;
+  gated?: boolean | string;
+  tags: string[];
+  files: HubFile[];
+  totalSize: number;
+  hasGguf: boolean;
+}
+
+export interface ManagedProcess {
+  id: string;
+  label: string;
+  tool: string;
+  argv: string[];
+  cwd: string;
+  pid?: number;
+  status: "starting" | "running" | "exited" | "failed" | "stopped";
+  exitCode?: number | null;
+  signal?: string | null;
+  startedAt: number;
+  endedAt?: number;
+  url?: string;
+  logPath: string;
+}
+
+export interface DownloadRecord {
+  id: string;
+  repo: string;
+  file: string;
+  dest: string;
+  received: number;
+  total: number | null;
+  status: "downloading" | "done" | "error" | "cancelled";
+  error?: string;
+  startedAt: number;
+}
+
+export interface RunResult {
+  code: number | null;
+  signal: string | null;
+  stdout: string;
+  stderr: string;
+  durationMs: number;
+}
+
+export interface OsamaEvent {
+  type: string;
+  data: any;
+  ts: number;
+}
+
+/* ---------------------------------------------------------------- dashboard */
+
+export interface DiskUsage {
+  bytes: number;
+  files: number;
+}
+
+export interface DiskBreakdown {
+  models: DiskUsage;
+  engines: DiskUsage;
+  downloads: DiskUsage;
+  logs: DiskUsage;
+  partialBytes: number;
+  partialFiles: number;
+  totalBytes: number;
+  volume: { totalBytes: number; freeBytes: number; usedPct: number } | null;
+}
+
+export interface ActivityEntry {
+  type: string;
+  count: number;
+  lastTs: number | null;
+}
+
+export interface HealthCheck {
+  id: string;
+  label: string;
+  status: "ok" | "warn" | "fail";
+  detail: string;
+}
+
+export interface StatsSnapshot {
+  generatedAt: string;
+  uptimeMs: number;
+  engine: {
+    installed: boolean;
+    tag?: string;
+    acceleration?: string;
+    installedAt?: string;
+    dir?: string;
+    tools: number;
+    toolNames: string[];
+    knownTools: number;
+    enginesInstalled: number;
+    sizeBytes: number;
+  };
+  library: {
+    count: number;
+    servable: number;
+    drafts: number;
+    external: number;
+    missing: number;
+    totalBytes: number;
+    avgBytes: number;
+    maxBytes: number;
+    contextMax: number | null;
+    contextTotal: number | null;
+    architectures: Array<{ name: string; count: number; bytes: number }>;
+    quantizations: Array<{ name: string; count: number; bytes: number }>;
+    recent: Array<{
+      id: string;
+      name: string;
+      quantization?: string;
+      architecture?: string;
+      sizeBytes: number;
+      addedAt: string;
+    }>;
+  };
+  disk: DiskBreakdown;
+  processes: {
+    total: number;
+    running: number;
+    exited: number;
+    failed: number;
+    stopped: number;
+    byTool: Array<{ tool: string; count: number }>;
+    runningNow: Array<{ id: string; label: string; tool: string; pid?: number; url?: string; uptimeMs: number }>;
+    oldestUptimeMs: number | null;
+  };
+  downloads: {
+    active: number;
+    done: number;
+    error: number;
+    cancelled: number;
+    records: Array<{ id: string; file: string; repo: string; received: number; total: number | null; status: string }>;
+  };
+  system: {
+    hostname: string;
+    os: string;
+    arch: string;
+    release: string;
+    cpuModel: string;
+    cpus: number;
+    totalMemBytes: number;
+    freeMemBytes: number;
+    usedMemBytes: number;
+    memUsedPct: number;
+    loadavg: number[];
+    loadPct: number;
+  };
+  activity: ActivityEntry[];
+  health: { score: number; checks: HealthCheck[] };
+}
+
+export interface SeriesSample {
+  ts: number;
+  memFreeBytes: number;
+  memUsedPct: number;
+  loadPct: number;
+  runningProcesses: number;
+  activeDownloads: number;
+  libraryBytes: number;
+}
+
+/** llama-server runtime metrics scraped from its /metrics endpoint. */
+export interface ServerMetrics {
+  up: boolean;
+  url?: string;
+  model?: string;
+  ftype?: string;
+  build?: string;
+  slots?: number;
+  nCtx?: number;
+  promptTokensTotal?: number;
+  tokensPredictedTotal?: number;
+  promptTps?: number;
+  predictedTps?: number;
+  requestsProcessing?: number;
+  requestsDeferred?: number;
+  cacheReusePct?: number | null;
+  nDecodeTotal?: number;
+  nTokensMax?: number;
+  error?: string;
+}
+
+/* ---------------------------------------------------------------- agentic mode */
+
+/** A tool the model may call while agentic mode is on. */
+export interface AgentTool {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+  mutating: boolean;
+}
+
+export interface AgentToolsResponse {
+  tools: AgentTool[];
+  readRoots: string[];
+  writableRoots: string[];
+  workspace: string;
+}
+
+/** Events streamed by POST /api/agent, one per line of SSE. */
+export type AgentEvent =
+  | { type: "assistant_delta"; text: string }
+  | { type: "step"; index: number }
+  | { type: "tool_call"; id: string; name: string; args: Record<string, unknown>; raw: string }
+  | { type: "tool_result"; id: string; name: string; ok: boolean; summary: string; content: string; durationMs: number }
+  | { type: "denied"; id: string; name: string; reason: string }
+  | { type: "compaction"; reason: string; before: number; after: number; kept: number }
+  | { type: "todos"; todos: TodoItem[] }
+  | { type: "approval_request"; id: string; command: string; cwd: string; timeoutMs: number }
+  | { type: "question"; id: string; question: string; options?: string[]; timeoutMs: number }
+  | { type: "final"; text: string; steps: number }
+  | { type: "error"; message: string };
+
+/** One entry of the visible agent trace attached to an assistant message. */
+export interface AgentStep {
+  id: string;
+  kind: "call" | "result" | "denied";
+  name: string;
+  args?: Record<string, unknown>;
+  summary?: string;
+  content?: string;
+  ok?: boolean;
+  durationMs?: number;
+}
+
+export interface AgentApproval {
+  id: string;
+  command: string;
+  cwd: string;
+}
+
+/** The model asked the user something; answered via /api/agent/answer/:id. */
+export interface AgentQuestion {
+  id: string;
+  question: string;
+  options?: string[];
+}
+
+export interface SessionMeta {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  workspace: string;
+  eventCount: number;
+  compacted: boolean;
+}
+
+/* ------------------------------------------------- context, memory, skills */
+
+export interface ContextBreakdown {
+  window: number;
+  used: number;
+  remaining: number;
+  pressure: number;
+  segments: Array<{ label: string; tokens: number }>;
+  overflow: boolean;
+  exact: boolean;
+  baseUrl?: string;
+  /** Whether the served model's chat template can express tool calls. */
+  toolSupport?: "full" | "none" | "unknown";
+}
+
+/** What the context endpoint accepts: one entry per message actually sent. */
+export interface ContextRequestMessage {
+  role: string;
+  content: string | null;
+}
+
+/* ------------------------------------------------------------------ workspace */
+
+export interface WorkspaceCandidate {
+  path: string;
+  label: string;
+  exists: boolean;
+  note?: string;
+}
+
+export interface WorkspacesResponse {
+  current: string;
+  chosen: boolean;
+  default: string;
+  candidates: WorkspaceCandidate[];
+  readRoots: string[];
+  writableRoots: string[];
+}
+
+/** The workspace directory browser. */
+export interface BrowseEntry {
+  name: string;
+  path: string;
+  hidden: boolean;
+}
+
+export interface BrowseResponse {
+  path: string;
+  parent: string | null;
+  home: string | null;
+  entries: BrowseEntry[];
+}
+
+/** A skill found in a remote repo, before installing. */
+export interface RemoteSkill {
+  path: string;
+  name: string;
+  description: string;
+  files: number;
+  bytes: number;
+  /** Set after this session installs it. */
+  installed?: string;
+}
+
+export interface SkillStoreResponse {
+  owner: string;
+  repo: string;
+  ref: string | null;
+  skills: RemoteSkill[];
+}
+
+export interface SkillMeta {
+  id: string;
+  name: string;
+  description: string;
+  file: string;
+  root: string;
+  tags?: string[];
+  version?: string;
+}
+
+export interface MemoryEntry {
+  id: string;
+  text: string;
+  scope: "global" | "workspace";
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  hits: number;
+}
+
+export interface MemoryResponse {
+  entries: MemoryEntry[];
+  block: string;
+  stats?: {
+    total: number;
+    byScope: Record<string, number>;
+    chars: Record<string, number>;
+    budget: Record<string, number>;
+  };
+  budgets: { global: number; workspace: number };
+  used: { global: number; workspace: number };
+}
+
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/** A file (or directory) inside the agent workspace, for the `@` picker. */
+export interface WorkspaceFile {
+  /** Path relative to the workspace root, forward slashes; dirs end with `/`. */
+  rel: string;
+  name: string;
+  dir: boolean;
+  size: number;
+}

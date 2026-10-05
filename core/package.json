@@ -1,0 +1,33 @@
+{
+  "name": "@osama/core",
+  "version": "0.1.0",
+  "description": "Osama engine — llama.cpp binary management, Hugging Face model hub, GGUF downloads, process control and command builders.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/dev.ts"
+  },
+  "dependencies": {
+    "pdfjs-dist": "^6.4.299",
+    "tar": "^7.4.3",
+    "yauzl": "^3.2.0"
+  },
+  "devDependencies": {
+    "@types/yauzl": "^2.10.3",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

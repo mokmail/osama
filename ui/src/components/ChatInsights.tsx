@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  Brain, CalendarClock, FileCode2, FolderOpen, History, Ruler, Settings2,
-  Sparkles, Wrench, Plus, Trash2, X, Play, Square,
+  AlertTriangle, Brain, CalendarClock, FileCode2, FolderOpen, History, Ruler, Settings2,
+  Sparkles, Wrench, Plus, Trash2, X, Play, Square, Search,
 } from "lucide-react";
 import { agentApi, type AgentMessagePayload } from "../lib/api";
 import type {
@@ -11,6 +11,7 @@ import type {
 import { fileBase } from "../lib/format";
 import type { StoredChat } from "../lib/chatStore";
 import { MemoryModal, SoulModal } from "./IdentityPanels";
+import { ArtifactsModal } from "./ArtifactBrowser";
 
 /**
  * The chat insights, rendered INTO the app's left sidebar (portal slot).
@@ -463,46 +464,6 @@ function SkillsModal() {
       ) : null}
 
       {error && <div className="wspick-error">{error}</div>}
-    </div>
-  );
-}
-
-/* ------------------------------------------------------------ artifacts */
-
-interface Artifact {
-  file: string;
-  op: string;
-  at: string;
-  sessionId: string;
-}
-
-function ArtifactsModal() {
-  const [arts, setArts] = useState<Artifact[]>([]);
-  useEffect(() => {
-    let alive = true;
-    const pull = async () => {
-      try {
-        const r = await fetch("/api/agent/artifacts");
-        if (alive && r.ok) setArts((await r.json()).artifacts);
-      } catch { /* ignore */ }
-    };
-    pull();
-    const t = setInterval(pull, 5000);
-    return () => { alive = false; clearInterval(t); };
-  }, []);
-  return (
-    <div className="stack" style={{ gap: 8 }}>
-      {arts.length === 0 ? (
-        <Empty text="nothing written yet — files the agent creates appear here" />
-      ) : (
-        arts.map((a, i) => (
-          <div className="rparticle wide" key={`${a.at}-${i}`} title={`${a.file} · ${a.op}`}>
-            <span className="rparticle-op">{a.op === "edit_file" ? "edit" : "write"}</span>
-            <span className="rparticle-name">{fileBase(a.file)}</span>
-            <span className="rparticle-at">{new Date(a.at).toLocaleString()}</span>
-          </div>
-        ))
-      )}
     </div>
   );
 }

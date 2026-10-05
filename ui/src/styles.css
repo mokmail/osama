@@ -1414,3 +1414,118 @@ kbd {
 .rpmem-mv:hover { color: var(--accent); }
 .idstrip-btn.on { color: var(--accent); border-color: var(--accent); }
 .persbtn-check { margin-left: 5px; vertical-align: -1px; color: var(--accent); }
+
+/* ------------------------------------------------------------ artifacts ---- */
+/* The browser rows: a clickable main area (preview) and separate action buttons,
+   so one click never does two things. Tokens only, like the rest of the theme. */
+
+.artlist { display: flex; flex-direction: column; gap: 2px; }
+.artrow {
+  display: flex; align-items: center; gap: 4px;
+  border: 1px solid transparent; border-radius: 6px; padding: 2px 4px;
+}
+.artrow:hover { border-color: var(--border); background: color-mix(in srgb, var(--card) 40%, transparent); }
+.artrow.open { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.artrow.inert { opacity: .66; }
+
+.artrow-main {
+  display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0;
+  background: transparent; border: 0; color: var(--text); cursor: pointer;
+  padding: 4px 2px; text-align: left; font-size: 12px;
+}
+.artrow-caret { color: var(--faint); flex: none; transition: transform .12s; }
+.artrow-caret.open { transform: rotate(90deg); }
+.artrow-icon { color: var(--faint); flex: none; }
+.artrow-name { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: none; max-width: 42%; }
+.artrow-dir {
+  color: var(--faint); font-size: 11px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;
+}
+.artrow-op {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .05em;
+  color: var(--faint); flex: none;
+}
+.artrow-op.edit { color: var(--accent); }
+.artrow-warn { color: var(--warn, #d08770); flex: none; display: inline-flex; }
+.artrow-gone { color: var(--faint); flex: none; display: inline-flex; }
+.artrow-at { color: var(--faint); font-size: 10px; flex: none; min-width: 46px; text-align: right; }
+
+.artrow-actions { display: flex; gap: 2px; flex: none; opacity: 0; transition: opacity .1s; }
+.artrow:hover .artrow-actions, .artrow.open .artrow-actions { opacity: 1; }
+.artrow-act {
+  display: inline-grid; place-items: center; width: 22px; height: 22px;
+  border-radius: 5px; border: 1px solid transparent; background: transparent;
+  color: var(--faint); cursor: pointer;
+}
+.artrow-act:hover { color: var(--text); border-color: var(--border); }
+.artrow-act:disabled { opacity: .3; cursor: default; }
+
+.artpreview {
+  border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin-top: 4px;
+}
+.artpreview-head {
+  display: flex; align-items: center; gap: 7px; padding: 6px 9px;
+  border-bottom: 1px solid var(--border); color: var(--faint); font-size: 11px;
+}
+.artpreview-name { color: var(--text); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.artpreview-body {
+  margin: 0; padding: 9px; max-height: 300px; overflow: auto;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11px; line-height: 1.5; white-space: pre; tab-size: 2;
+}
+
+/* ---------------------------------------------------------- artifacts page -- */
+/* Two columns: what the agent produced, and a browser for the folder. The
+   page reuses the .artrow list styles; only the shell and the browser are new. */
+
+.artpage { min-height: 0; }
+.artpage-title { font-size: 13px; font-weight: 600; letter-spacing: .01em; }
+.artpage-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; align-items: start; }
+.artpage-body.with-dir { grid-template-columns: minmax(0, 1.35fr) minmax(260px, 1fr); }
+@media (max-width: 1000px) { .artpage-body.with-dir { grid-template-columns: minmax(0, 1fr); } }
+
+.artpage-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.artpage-pane { min-width: 0; }
+.artlist { max-height: 60vh; overflow: auto; }
+.artrow-main { cursor: pointer; }
+.artrow.open .artrow-name { color: var(--accent); }
+
+/* folder browser */
+.dirbrowser {
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px; display: flex; flex-direction: column; gap: 7px; min-width: 0;
+}
+.dirbar { display: flex; align-items: center; gap: 6px; }
+.dirbar-path {
+  flex: 1; min-width: 0; font-size: 11px; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+.dirbar-search { color: var(--faint); flex: none; }
+.diritems { display: flex; flex-direction: column; gap: 1px; max-height: 52vh; overflow: auto; }
+.dirow { display: flex; align-items: center; gap: 4px; border-radius: 5px; }
+.dirow:hover { background: color-mix(in srgb, var(--card) 45%, transparent); }
+.dirow.hl { background: color-mix(in srgb, var(--accent) 12%, transparent); outline: 1px solid var(--accent); }
+.dirow-main {
+  display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0;
+  background: transparent; border: 0; color: var(--text); cursor: pointer;
+  padding: 3px 4px; text-align: left; font-size: 12px;
+}
+.dirow-icon { color: var(--faint); flex: none; }
+.dirow-icon.dir { color: var(--accent); }
+.dirow-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dirow-size { color: var(--faint); font-size: 10px; flex: none; }
+
+/* The menu button exists only where the sidebar goes off-canvas; showing it
+   above that width would offer a toggle for a sidebar that never hides. */
+.nav-toggle { display: none; }
+@media (max-width: 860px) { .nav-toggle { display: inline-grid; } }
+
+.dirfolders { display: flex; flex-direction: column; gap: 1px; max-height: 22vh; overflow: auto; }
+.dirrow { display: flex; align-items: center; gap: 4px; border-radius: 5px; }
+.dirrow:hover { background: color-mix(in srgb, var(--card) 45%, transparent); }
+.dirrow-main {
+  display: flex; align-items: center; gap: 7px; flex: 1; min-width: 0;
+  background: transparent; border: 0; color: var(--text); cursor: pointer;
+  padding: 3px 4px; text-align: left; font-size: 12px;
+}

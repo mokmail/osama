@@ -60,6 +60,32 @@ The engine (`npm start`, default `http://127.0.0.1:5178`) serves the UI and:
 The routes live in `server/src/routes/` (one module per area, wired in
 `routes/index.ts`); the server entry is a thin transport shell.
 
+## Artifacts
+
+The **Artifacts** page (`#artifacts` in the URL) is the browser for everything
+the agent wrote. It has three parts: the files, the folders they landed in, and
+a jailed folder browser beside them.
+
+- **Folders come first**, because a folder is the shortest route to the file
+  manager — and a folder still exists when every file in it has been deleted.
+- **Clicking a file** selects it: it previews inline and its folder opens in the
+  browser pane. The two OS hand-offs stay explicit buttons:
+  **Reveal** shows the file (or its folder) in Finder, **Open** hands it to the
+  default app.
+- **The folder pane is jailed** the same way the file tools are: "up" stops at
+  the root that contains the directory, never at `/`, and a symlink pointing
+  outside is skipped. Its search looks at file *contents* as well as names, so
+  "which file mentions the quantize fix" is answerable without a shell.
+
+Opening a path hands it to the operating system, so that endpoint uses a
+two-part test: the path must be inside the current jail **or** be a path this
+server itself recorded as an artifact. The second half is what makes the page
+usable — an artifact written while a different workspace was active fails the
+current jail, and refusing it would mean the files you most want to open are
+exactly the ones you cannot. It is still not an arbitrary-file-opener: the path
+must already be in this server's own session log, so the caller cannot name
+`/etc` and have it opened.
+
 ## Agentic mode
 
 Turned on per chat session. 31 tools: files, shell, web (search/fetch/crawl/raw HTTP/download), memory, soul, skills (load/list/create/install), todos, sessions, jobs, context. The server runs the loop: model request → tool

@@ -524,6 +524,74 @@ export interface MemoryResponse {
   userBudget: number;
 }
 
+/* --------------------------------------------------------------- artifacts */
+
+/** A file the agent wrote or edited, as the artifact browser sees it. */
+export interface ArtifactFile {
+  /** The path as the tool recorded it. */
+  file: string;
+  /** The absolute, resolved path — what the OS needs to open it. */
+  abs: string;
+  op: string;
+  at: string;
+  sessionId: string;
+  name: string;
+  /** The containing directory. */
+  dir: string;
+  /** Lowercase extension, no dot. */
+  ext: string;
+  exists: boolean;
+  size: number;
+  mtime: string | null;
+  /** True when the path is outside the allowed roots, so it cannot be opened. */
+  jailed: boolean;
+  /** How many times the agent wrote this path. */
+  writes: number;
+}
+
+export interface ArtifactsResponse {
+  artifacts: ArtifactFile[];
+  total: number;
+  truncated: boolean;
+}
+
+export interface ArtifactPreview {
+  ok: boolean;
+  path: string;
+  name: string;
+  ext: string;
+  size: number;
+  mtime: string;
+  text?: string;
+  binary?: boolean;
+  truncated?: boolean;
+  lines?: number;
+  error?: string;
+}
+
+/** One row in the artifact page's directory browser. */
+export interface DirEntry {
+  name: string;
+  path: string;
+  dir: boolean;
+  size: number;
+  mtime: string | null;
+  /** 1 when a content search matched (not just the name). */
+  matches?: number;
+}
+
+export interface DirListing {
+  ok: boolean;
+  path?: string;
+  /** The parent directory, or null at the top of the allowed root. */
+  parent?: string | null;
+  /** The allowed root this directory belongs to — where "up" stops. */
+  root?: string;
+  entries?: DirEntry[];
+  matchCount?: number;
+  error?: string;
+}
+
 /* ------------------------------------------------------ soul + memory (new) */
 
 export interface Personality {

@@ -1,10 +1,13 @@
 import type {
   AgentEvent,
   AgentToolsResponse,
+  ArtifactPreview,
+  ArtifactsResponse,
   BrowseResponse,
   BuiltPrompt,
   ContextBreakdown,
   ContextRequestMessage,
+  DirListing,
   DownloadRecord,
   EnginePlan,
   GgufInspectResponse,
@@ -229,6 +232,23 @@ export const agentApi = {
     post<{ ok: boolean; applied: string[]; stats: MemoryStats }>("/api/agent/memory/batch", { operations }),
   forgetMemory: (body: { selector: string; target?: "memory" | "user"; scope?: "global" | "workspace" }) =>
     post<{ ok: boolean; removed: number; error?: string }>("/api/agent/memory/forget", body),
+
+  /* ------------------------------------------------------------- artifacts */
+
+  artifacts: (limit = 100) => get<ArtifactsResponse>(`/api/agent/artifacts?limit=${limit}`),
+  previewArtifact: (path: string, max?: number) =>
+    get<ArtifactPreview>(`/api/agent/artifacts/preview?path=${encodeURIComponent(path)}${max ? `&max=${max}` : ""}`),
+  /** List a directory (jailed) — the browse side of the artifact page. */
+  artifactDir: (path: string, q = "", opts: { limit?: number; contents?: boolean } = {}) =>
+    get<DirListing>(
+      `/api/agent/artifacts/dir?path=${encodeURIComponent(path)}` +
+        `${q ? `&q=${encodeURIComponent(q)}` : ""}` +
+        `${opts.limit ? `&limit=${opts.limit}` : ""}` +
+        `${opts.contents === false ? "&contents=0" : ""}`,
+    ),
+  /** Open the containing folder with the file selected, where the OS allows it. */
+  revealArtifact: (path: string) => post<{ ok: boolean; command?: string }>("/api/agent/artifacts/reveal", { path }),
+  openArtifact: (path: string) => post<{ ok: boolean; command?: string }>("/api/agent/artifacts/open", { path }),
 
   /* ------------------------------------------------ GGUF metadata editing */
 

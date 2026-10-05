@@ -377,24 +377,54 @@ export const agentRoutes: RouteModule = (deps) => {
 
     route("GET", "/api/agent/todos", ({ res }) => json(res, 200, { todos: agentTodos })),
 
-    // --- artifacts: files the agent produced, newest first ------------------
-    route("GET", "/api/agent/artifacts", ({ res }) => {
-      const out: Array<{ file: string; op: string; at: string; sessionId: string }> = [];
-      for (const s of core.listSessions()) {
-        const rec = core.readSession(s.id);
-        if (!rec) continue;
-        for (const e of rec.events) {
-          if (e.kind !== "artifact" || !e.data.file) continue;
-          out.push({
-            file: String(e.data.file),
-            op: String(e.data.op ?? "write"),
-            at: new Date(e.ts).toISOString(),
-            sessionId: rec.id,
-          });
-        }
-      }
-      out.sort((a, b) => (b.at > a.at ? 1 : -1));
-      json(res, 200, { artifacts: out.slice(0, 50) });
+    // --- artifacts: files the agent produced, and what you can do with them --
+    // The list, the preview and the OS hand-offs live together in core/artifacts
+    // so they share one jail. The endpoints re-check every path rather than
+    // trusting what the client sends back.
+    route("GET", "/api/agent/artifacts", ({ res, url }) => {
+      const limit = Number(q(url, "limit") ?? 100);
+      json(res, 200, core.listArtifacts(Number.isFinite(limit) ? limit : 100));
+    }),
+
+    route("GET", "/api/agent/artifacts/preview", ({ res, url }) => {
+      const p = q(url, "path");
+      if (!p) return fail(res, 400, new Error("path is required"));
+      const max = Number(q(url, "max"));
+      const r = core.previewArtifact(p, Number.isFinite(max) && max > 0 ? max : undefined);
+      if (!r.ok) return fail(res, 400, new Error(r.error ?? "cannot read that file"));
+      json(res, 200, r);
+    }),
+
+    // List a directory, jailed to the same roots as everything else. This is
+    // what makes the artifact list browsable: a row's folder can be opened and
+    // walked, and `parent` stops at the root rather than at `/`.
+    route("GET", "/api/agent/artifacts/dir", ({ res, url }) => {
+      const p = q(url, "path");
+      if (!p) return fail(res, 400, new Error("path is required"));
+      const limit = Number(q(url, "limit"));
+      const r = core.browseArtifactDir(p, q(url, "q") ?? "", {
+        limit: Number.isFinite(limit) && limit > 0 ? limit : undefined,
+        contentSearch: q(url, "contents") !== "0",
+      });
+      if (!r.ok) return fail(res, 400, new Error(r.error ?? "cannot list that directory"));
+      json(res, 200, r);
+    }),
+
+    // Reveal and open both hand a path to the OS. They are POST because they
+    // cause a side effect, and the path travels in the body so a long or
+    // unusual filename cannot be truncated by a URL length limit.
+    route("POST", "/api/agent/artifacts/reveal", async ({ req, res }) => {
+      const body = await readBody(req);
+      const r = core.revealInFileManager(String(body.path ?? ""));
+      if (!r.ok) return fail(res, 400, new Error(r.error ?? "could not open the folder"));
+      json(res, 200, r);
+    }),
+
+    route("POST", "/api/agent/artifacts/open", async ({ req, res }) => {
+      const body = await readBody(req);
+      const r = core.openPath(String(body.path ?? ""));
+      if (!r.ok) return fail(res, 400, new Error(r.error ?? "could not open the file"));
+      json(res, 200, r);
     }),
 
     // --- durable sessions ---------------------------------------------------

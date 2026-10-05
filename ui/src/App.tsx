@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Activity, Boxes, Cpu, Download, FileCog, Gauge, HardDrive, Layers, LayoutDashboard, Menu,
+  Activity, Boxes, Cpu, Download, FileCog, FileCode2, Gauge, HardDrive, Layers, LayoutDashboard, Menu,
   MessagesSquare, Server as ServerIcon, ShieldCheck, Terminal, Wrench,
 } from "lucide-react";
 import { api, subscribeEvents } from "./lib/api";
@@ -15,6 +15,7 @@ import { ServerView } from "./views/Server";
 import { ChatView } from "./views/Chat";
 import { ProcessesView } from "./views/Processes";
 import { CreateView } from "./views/Create";
+import { ArtifactsView } from "./views/Artifacts";
 
 export type ViewId =
   | "dashboard"
@@ -30,7 +31,14 @@ export type ViewId =
   | "lora"
   | "evaluate"
   | "inspect"
-  | "processes";
+  | "processes"
+  | "artifacts";
+
+/** Every view id, for validating a hash or a stored choice before trusting it. */
+const VIEW_IDS: ViewId[] = [
+  "dashboard", "chat", "models", "hub", "engine", "server", "run",
+  "create", "quantize", "edit", "lora", "evaluate", "inspect", "processes", "artifacts",
+];
 
 const NAV: Array<{ group: string; items: Array<{ id: ViewId; label: string; icon: typeof Cpu }> }> = [
   {
@@ -38,6 +46,7 @@ const NAV: Array<{ group: string; items: Array<{ id: ViewId; label: string; icon
     items: [
       { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
       { id: "chat", label: "Chat", icon: MessagesSquare },
+      { id: "artifacts", label: "Artifacts", icon: FileCode2 },
     ],
   },
   {
@@ -78,6 +87,10 @@ export interface EventBus {
 
 function Shell() {
   const [view, setView] = useState<ViewId>(() => {
+    // A `#view` hash wins over the stored choice, so a view can be linked to
+    // (and reopened after a reload) without walking the sidebar.
+    const hash = window.location.hash.replace(/^#\/?/, "");
+    if (hash && VIEW_IDS.includes(hash as ViewId)) return hash as ViewId;
     const saved = localStorage.getItem("osama.view");
     return (saved as ViewId) || "dashboard";
   });
@@ -87,7 +100,22 @@ function Shell() {
   const [insightSlot, setInsightSlot] = useState<HTMLElement | null>(null);
   const toast = useToast();
 
-  useEffect(() => { localStorage.setItem("osama.view", view); }, [view]);
+  useEffect(() => {
+    localStorage.setItem("osama.view", view);
+    // Keep the hash in step so the address bar reflects where you are.
+    const want = `#${view}`;
+    if (window.location.hash !== want) window.history.replaceState(null, "", want);
+  }, [view]);
+
+  // Follow the hash when it changes (back/forward, or a pasted link).
+  useEffect(() => {
+    const onHash = () => {
+      const h = window.location.hash.replace(/^#\/?/, "");
+      if (h && VIEW_IDS.includes(h as ViewId)) setView(h as ViewId);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   useEffect(() => {
     api.system().then(setSystem).catch((e) => toast.push("err", `Could not reach Osama engine: ${e.message}`));
@@ -129,6 +157,7 @@ function Shell() {
               return (
                 <button
                   key={item.id}
+                  id={`nav-${item.id}`}
                   className={`nav-item ${view === item.id ? "active" : ""}`}
                   onClick={() => {
                     setView(item.id);
@@ -148,7 +177,7 @@ function Shell() {
 
       <main className="main">
         <header className="topbar">
-          <button className="btn ghost icon" onClick={() => setNavOpen((v) => !v)} style={{ display: "none" }} aria-label="Menu">
+          <button className="btn ghost icon nav-toggle" onClick={() => setNavOpen((v) => !v)} aria-label="Menu">
             <Menu size={17} />
           </button>
           <h1>{title}</h1>
@@ -182,6 +211,7 @@ function Shell() {
             {view === "edit" && <ToolView group="edit" bus={bus} />}
             {view === "lora" && <ToolView group="edit" bus={bus} />}
             {view === "processes" && <ProcessesView bus={bus} />}
+            {view === "artifacts" && <ArtifactsView bus={bus} />}
           </div>
         </div>
       </main>

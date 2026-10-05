@@ -1297,3 +1297,46 @@ kbd {
 }
 .cm-edit textarea:focus { outline: none; border-color: var(--text-faint); }
 .cm-edit-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
+/* ------------------------------ Discover: provider marks + install filter */
+.plogo {
+  display: inline-flex; align-items: center; justify-content: center;
+  flex: none; border-radius: 3px; line-height: 1;
+}
+/* Hugging Face gets its real mark; the emoji-like yellow face reads at 17px. */
+.plogo-huggingface { background: #ffd21e; border-radius: 50%; color: #14110a; }
+.plogo-modelscope .plogo-letter { color: #624aff; font-family: var(--mono); font-size: 11px; font-weight: 500; }
+.plogo-civitai .plogo-letter { color: #4f7fff; font-family: var(--mono); font-size: 11px; font-weight: 500; }
+.plogo-ollama { color: var(--text-dim); }
+.plogo-url { color: var(--text-faint); }
+.plogo-letter { letter-spacing: 0; }
+
+.hub-filter { display: flex; gap: 6px; margin: 4px 0 14px; }
+.hub-filter-btn {
+  font-family: var(--mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.14em;
+  padding: 5px 11px; border-radius: 999px; cursor: pointer; color: var(--text-faint);
+  background: transparent; border: 1px solid var(--border);
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.hub-filter-btn:hover { color: var(--text-dim); border-color: var(--border-strong); }
+.hub-filter-btn.on { color: var(--text); border-color: var(--text-faint); background: var(--surface-2); }
+.hub-filter-btn .faint { color: var(--text-faint); margin-left: 2px; }
+
+.tile.installed { border-color: var(--ok); }
+
+/* ----------------------------- Create: metadata editor details blocks */
+.metadata-group {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  background: var(--surface);
+}
+.metadata-group > summary {
+  cursor: pointer;
+  color: var(--text-dim);
+  padding: 2px 0;
+  list-style: none;
+}
+.metadata-group > summary::-webkit-details-marker { display: none; }
+.metadata-group > summary:hover { color: var(--text); }
+.metadata-group[open] > summary { color: var(--text); margin-bottom: 4px; }

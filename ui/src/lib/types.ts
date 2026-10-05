@@ -511,3 +511,54 @@ export interface WorkspaceFile {
   dir: boolean;
   size: number;
 }
+
+/* ------------------------------------------------- GGUF metadata + LoRA */
+
+/** The override types llama-quantize's `--override-kv` accepts. */
+export type OverrideType = "str" | "int" | "float" | "bool";
+
+export interface MetadataEdit {
+  key: string;
+  type: OverrideType;
+  value: string | number | boolean;
+}
+
+export interface EditableKey {
+  key: string;
+  label: string;
+  type: OverrideType;
+  help?: string;
+}
+
+export interface GgufInspectResponse {
+  file: string;
+  metadata: Record<string, string | number | boolean>;
+  editable: EditableKey[];
+  /** The architecture-prefixed context-length key, when the file has one. */
+  contextKey?: string | null;
+  suggestedOutput: string;
+}
+
+export interface LoraInspection {
+  file: string;
+  ok: boolean;
+  sizeBytes?: number;
+  baseModel?: string;
+  error?: string;
+}
+
+/** A completed metadata edit, as reported over the event bus. */
+export interface EditRunResult {
+  id: string;
+  tool: string;
+  stage: "start" | "done" | "error";
+  output?: string;
+  before?: Record<string, string | number | boolean>;
+  after?: Record<string, string | number | boolean>;
+  /** Edits that exited 0 but did NOT actually land — the honest signal. */
+  unapplied?: string[];
+  verified?: boolean;
+  error?: string;
+  line?: string;
+  result?: RunResult;
+}

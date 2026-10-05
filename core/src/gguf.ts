@@ -141,32 +141,59 @@ function readValue(r: Reader, type: GgufType): { scalar?: string | number | bool
   }
 }
 
-/** Read GGUF header + metadata. Reads at most `maxBytes` from disk. */
+/**
+ * Read GGUF header + metadata.
+ *
+ * Metadata can honestly be large — a chat template alone runs to kilobytes, and
+ * a tokenizer vocabulary can be megabytes — so `maxBytes` is a *starting*
+ * window, not a hard ceiling. If the metadata runs past it the buffer is grown
+ * and the parse retried, which is what makes this safe to call with a small
+ * window (the metadata editor's pre-flight check does exactly that). A genuine
+ * parse fault still throws.
+ */
 export function readGguf(file: string, maxBytes = 64 * 1024 * 1024): GgufInfo {
   const fd = fs.openSync(file, "r");
   try {
-    const size = Math.min(fs.statSync(file).size, maxBytes);
-    const buf = Buffer.alloc(size);
-    fs.readSync(fd, buf, 0, size, 0);
-    const r = new Reader(buf);
-    const magic = r.u32();
-    if (magic !== GGUF_MAGIC) throw new Error("not a GGUF file (bad magic)");
-    const version = r.u32();
-    const tensorCount = Number(r.u64());
-    const metadataCount = Number(r.u64());
-    const metadata: Record<string, string | number | boolean> = {};
-    const arrayCounts: Record<string, number> = {};
-    for (let i = 0; i < metadataCount; i++) {
-      const key = r.str();
-      const type = r.u32() as GgufType;
-      const { scalar, arrayLen } = readValue(r, type);
-      if (scalar !== undefined) metadata[key] = scalar;
-      else if (arrayLen !== undefined) arrayCounts[key] = arrayLen;
+    const fileSize = fs.statSync(file).size;
+    let window = Math.max(4096, Math.min(fileSize, maxBytes));
+    for (;;) {
+      const buf = Buffer.alloc(window);
+      fs.readSync(fd, buf, 0, window, 0);
+      const r = new Reader(buf);
+      try {
+        return parseHeader(r, window >= fileSize);
+      } catch (err) {
+        // Short read: the metadata ran past our window and there is more file
+        // to fetch. Grow and retry — once.
+        if (window < fileSize) {
+          window = Math.min(fileSize, window * 4);
+          continue;
+        }
+        throw err;
+      }
     }
-    return { version, tensorCount, metadataCount, metadata, arrayCounts };
   } finally {
     fs.closeSync(fd);
   }
+}
+
+function parseHeader(r: Reader, wholeFile: boolean): GgufInfo {
+  const magic = r.u32();
+  if (magic !== GGUF_MAGIC) throw new Error("not a GGUF file (bad magic)");
+  const version = r.u32();
+  const tensorCount = Number(r.u64());
+  const metadataCount = Number(r.u64());
+  const metadata: Record<string, string | number | boolean> = {};
+  const arrayCounts: Record<string, number> = {};
+  for (let i = 0; i < metadataCount; i++) {
+    const key = r.str();
+    const type = r.u32() as GgufType;
+    const { scalar, arrayLen } = readValue(r, type);
+    if (scalar !== undefined) metadata[key] = scalar;
+    else if (arrayLen !== undefined) arrayCounts[key] = arrayLen;
+  }
+  void wholeFile;
+  return { version, tensorCount, metadataCount, metadata, arrayCounts };
 }
 
 /** Human file-type names per llama.cpp's ggml file_type enum (partial, common values). */
@@ -206,6 +233,11 @@ const FILE_TYPE: Record<number, string> = {
   35: "Q4_0_8_8",
   36: "TQ1_0",
   37: "TQ2_0",
+  // Added upstream since this table was written; without them a modern model
+  // reads as "unknown quantization" in the library and on the dashboard.
+  38: "MXFP4_MOE",
+  40: "Q1_0",
+  41: "Q2_0",
 };
 
 export interface ModelCard {
@@ -218,6 +250,31 @@ export interface ModelCard {
   fileType?: number;
   tokenizerModel?: string;
   chatTemplate?: boolean;
+}
+
+/**
+ * Does this GGUF look like a speculative-decoding draft head (MTP / NextN)
+ * rather than a full model?
+ *
+ * llama-server SIGSEGVs when a draft head is loaded as the main model, and the
+ * UI/server already have a 422 guard for it — but nothing ever set the flag, so
+ * the guard never fired. A draft head is recognisably short: a handful of
+ * blocks and a near-zero parameter count. Both facts come straight from the
+ * header, so this needs no heuristics beyond generous thresholds.
+ */
+export function isDraftModel(info: GgufInfo): boolean {
+  const md = info.metadata;
+  const arch = typeof md["general.architecture"] === "string" ? (md["general.architecture"] as string) : undefined;
+  const blocks = arch ? md[`${arch}.block_count`] : undefined;
+  const params = typeof md["general.parameter_count"] === "number" ? (md["general.parameter_count"] as number) : undefined;
+
+  // A real generative model never has fewer than ~8 blocks.
+  if (typeof blocks === "number" && blocks > 0 && blocks <= 4) return true;
+  // A draft head is a single block's worth of weights: far under 200M params,
+  // while every servable model in practice exceeds 500M.
+  if (typeof params === "number" && params > 0 && params < 200_000_000) return true;
+  if (typeof params === "number" && params < 0) return true;
+  return false;
 }
 
 /** Turn raw GGUF metadata into a friendly model card. */

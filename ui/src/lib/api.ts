@@ -6,12 +6,15 @@ import type {
   ContextRequestMessage,
   DownloadRecord,
   EnginePlan,
+  GgufInspectResponse,
   HubModel,
   HubRepo,
   InstalledEngine,
   LocalModel,
+  LoraInspection,
   ManagedProcess,
   MemoryResponse,
+  MetadataEdit,
   ModelCard,
   ReleaseInfo,
   SeriesSample,
@@ -200,6 +203,33 @@ export const agentApi = {
   skills: () => get<{ skills: SkillMeta[]; roots: string[] }>("/api/agent/skills"),
   memory: () => get<MemoryResponse>("/api/agent/memory"),
   todos: () => get<{ todos: TodoItem[] }>("/api/agent/todos"),
+
+  /* ------------------------------------------------ GGUF metadata editing */
+
+  /** The metadata of a file not yet in the library, for the editor form. */
+  inspectGguf: (file: string) =>
+    post<GgufInspectResponse>("/api/gguf/inspect", { file }),
+
+  /** Metadata of a library model, plus the keys worth editing. */
+  modelMetadata: (id: string) =>
+    get<GgufInspectResponse>(`/api/models/${encodeURIComponent(id)}/metadata`),
+
+  /**
+   * Edit metadata and resave. Returns immediately with a run id; the result —
+   * including whether each edit actually landed — arrives over the event bus.
+   */
+  editModel: (body: { file: string; output?: string; edits: MetadataEdit[]; dryRun?: boolean; keepSplit?: boolean }) =>
+    post<{ runId: string; output: string; command: string; overrides: string[] }>("/api/models/edit", body),
+
+  /* ------------------------------------------------------------- LoRA */
+
+  inspectLora: (file: string) =>
+    get<{ inspection: LoraInspection; notes: Record<string, string> }>(
+      `/api/lora/inspect?file=${encodeURIComponent(file)}`,
+    ),
+
+  mergeLora: (body: { model: string; lora: string[]; output: string; threads?: number }) =>
+    post<{ runId: string; output: string; command: string }>("/api/lora/merge", body),
 
   /**
    * Measure the current request against the window. POST because a real

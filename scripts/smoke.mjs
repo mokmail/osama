@@ -106,8 +106,27 @@ async function main() {
 
   // ---------------------------------------------------------------- models
   const models = await api("/api/models");
-  const model = models.models?.find((m) => !m.missing);
   record("Local model library scanned", Array.isArray(models.models), `${models.models?.length ?? 0} model(s)`);
+
+  /**
+   * Pick a model to exercise. The newest library entry is not a good default:
+   * a build cannot load every architecture (an unrecognised `general.architecture`
+   * is refused at load time), and a MoE at an extreme quant can segfault on a
+   * CPU-only build. Prefer a small model whose architecture this build is known
+   * to handle, and say which one was chosen so a failure is attributable.
+   */
+  const KNOWN_GOOD = /^(llama|gemma3?|qwen2|qwen3|qwen3moe|phi3|phi4|mistral|deepseek2?|gpt2|mpt|falcon|starcoder2?)$/i;
+  const usable = (m) =>
+    !m.missing &&
+    !m.draftOnly &&
+    (m.card?.architecture ? KNOWN_GOOD.test(m.card.architecture) : true);
+  const model =
+    models.models?.filter((m) => usable(m) && m.sizeBytes < 3 * 1024 ** 3).sort((a, b) => a.sizeBytes - b.sizeBytes)[0] ??
+    models.models?.find(usable) ??
+    models.models?.find((m) => !m.missing);
+  if (model) {
+    record("Usable model for inference", true, `${model.name} (${model.card?.architecture ?? "?"})`);
+  }
 
   // ------------------------------------------------------- live inference
   if (active && model && !SKIP_CHAT) {
@@ -145,8 +164,15 @@ async function main() {
             }),
           });
           const text = await res.text();
-          const content = [...text.matchAll(/"content":"([^"]*)"/g)].map((m) => m[1]).join("");
-          record("Chat: streamed completion", content.trim().length > 0, JSON.stringify(content.slice(0, 40)));
+          const content = [...text.matchAll(/"content":"((?:[^"\\]|\\.)*)"/g)].map((m) => m[1]).join("");
+          // llama-server streams {"error":{...}} WITH HTTP 200 on a compute
+          // failure, so a bare "no text" would hide the cause. Surface it.
+          const err = /"error":\{[^}]*"message":"([^"]*)"/.exec(text)?.[1];
+          if (!content.trim() && err) {
+            record("Chat: streamed completion", false, `llama-server: ${err}`);
+          } else {
+            record("Chat: streamed completion", content.trim().length > 0, JSON.stringify(content.slice(0, 40)));
+          }
         }
       }
     } catch (err) {
@@ -160,7 +186,6 @@ async function main() {
   } else if (!model) {
     record("Serve + chat (llama-server)", false, "no model in library — run: node scripts/osama.mjs pull ggml-org/gemma-3-1b-it-GGUF gemma-3-1b-it-Q4_K_M.gguf");
   }
-
   // ---------------------------------------------------------------- report
   if (AS_JSON) {
     console.log(JSON.stringify({ base: BASE, passed: results.length - failed, failed, results }, null, 2));

@@ -38,6 +38,9 @@ export const KNOWN_TOOLS = [
   "llama-export-lora",
   "llama-gguf",
   "ggml-rpc-server",
+  // Shipped by the official build and declared as a tool in commands.ts; it was
+  // missing here, so "Run CLI → Completion" could never resolve its binary.
+  "llama-completion",
 ] as const;
 
 export type ToolName = (typeof KNOWN_TOOLS)[number] | string;

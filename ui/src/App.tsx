@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Activity, Boxes, Cpu, Download, Gauge, HardDrive, LayoutDashboard, Menu,
+  Activity, Boxes, Cpu, Download, FileCog, Gauge, HardDrive, Layers, LayoutDashboard, Menu,
   MessagesSquare, Server as ServerIcon, ShieldCheck, Terminal, Wrench,
 } from "lucide-react";
 import { api, subscribeEvents } from "./lib/api";
@@ -14,6 +14,7 @@ import { ToolView } from "./views/ToolView";
 import { ServerView } from "./views/Server";
 import { ChatView } from "./views/Chat";
 import { ProcessesView } from "./views/Processes";
+import { CreateView } from "./views/Create";
 
 export type ViewId =
   | "dashboard"
@@ -24,6 +25,9 @@ export type ViewId =
   | "server"
   | "run"
   | "create"
+  | "quantize"
+  | "edit"
+  | "lora"
   | "evaluate"
   | "inspect"
   | "processes";
@@ -54,7 +58,9 @@ const NAV: Array<{ group: string; items: Array<{ id: ViewId; label: string; icon
     group: "Tools",
     items: [
       { id: "run", label: "Run CLI", icon: Terminal },
-      { id: "create", label: "Create", icon: Wrench },
+      { id: "quantize", label: "Quantize", icon: Wrench },
+      { id: "edit", label: "Edit GGUF", icon: FileCog },
+      { id: "lora", label: "Merge LoRA", icon: Layers },
       { id: "evaluate", label: "Evaluate", icon: Gauge },
       { id: "inspect", label: "Inspect", icon: ShieldCheck },
     ],
@@ -169,9 +175,12 @@ function Shell() {
             {view === "engine" && <EngineView system={system} bus={bus} />}
             {view === "server" && <ServerView bus={bus} onNavigate={setView} />}
             {view === "run" && <ToolView group="run" bus={bus} />}
-            {view === "create" && <ToolView group="create" bus={bus} />}
+            {view === "create" && <CreateView bus={bus} />}
             {view === "evaluate" && <ToolView group="evaluate" bus={bus} />}
             {view === "inspect" && <ToolView group="inspect" bus={bus} />}
+            {view === "quantize" && <ToolView group="create" bus={bus} />}
+            {view === "edit" && <ToolView group="edit" bus={bus} />}
+            {view === "lora" && <ToolView group="edit" bus={bus} />}
             {view === "processes" && <ProcessesView bus={bus} />}
           </div>
         </div>

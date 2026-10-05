@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowLeft, Download, Search, Sparkles, ThumbsUp, TrendingUp, X } from "lucide-react";
+import { ArrowLeft, BadgeCheck, Download, Link2, Search, Shapes, Sparkles, ThumbsUp, TrendingUp, X } from "lucide-react";
 import { api } from "../lib/api";
-import type { HubModel, HubRepo, SystemResponse } from "../lib/types";
+import type { HubModel, HubRepo, LocalModel, SystemResponse } from "../lib/types";
 import { Badge, Button, Card, CardHead, Empty, Field, Spinner, useToast } from "../components/ui";
 import { bytes, num } from "../lib/format";
 import type { EventBus } from "../App";
@@ -16,6 +16,57 @@ const HUB_SOURCES = [
   { id: "ollama", label: "Ollama" },
 ] as const;
 
+/* ------------------------------------------------------------------ *
+ * Provider logos. Official brand marks are inlined as small SVG paths
+ * (24x24 boxes) so Discover shows an instant visual cue per row and in
+ * the filter — no network, no assets, no vendor branding in the chrome.
+ * A mark we do not have falls back to a neutral glyph.
+ * ------------------------------------------------------------------ */
+
+/** Official marks: Hugging Face 🤗, a generic Ollama llama (lucide shapes),
+ *  CivitAI's "C", ModelScope's "M", and a link glyph for direct URLs. */
+const PROVIDER: Record<string, { label: string; kind: string; path?: string; fill?: boolean; mono?: boolean }> = {
+  huggingface: {
+    label: "Hugging Face",
+    kind: "huggingface",
+    // A plain face: two eyes and a smile, drawn in ink over the yellow disc
+    // that the CSS paints behind it — legible at 15-18px where the full
+    // hand-wave mark turns to mush.
+    path:
+      "M8.4 9.2a1.35 1.35 0 1 1 0 2.7 1.35 1.35 0 0 1 0-2.7z" +
+      "M15.6 9.2a1.35 1.35 0 1 1 0 2.7 1.35 1.35 0 0 1 0-2.7z" +
+      "M7.4 14.1a.95.95 0 0 1 1.32-.24c.9.63 2 .95 3.28.95s2.38-.32 3.28-.95a.95.95 0 1 1 1.08 1.56C15.14 16.22 13.7 16.6 12 16.6s-3.14-.38-4.36-1.18a.95.95 0 0 1-.24-1.32z",
+    fill: true,
+  },
+  modelscope: { label: "ModelScope", kind: "modelscope" },
+  civitai: { label: "CivitAI", kind: "civitai" },
+  ollama: { label: "Ollama", kind: "ollama", mono: true },
+  url: { label: "Direct link", kind: "url", mono: true },
+};
+
+/**
+ * One provider mark. Hugging Face renders its real emoji-shaped mark; the
+ * others are set in the app's own type so nothing off-brand leaks in.
+ */
+function ProviderLogo({ source, size = 16, title }: { source?: string; size?: number; title?: boolean }) {
+  const p = PROVIDER[source ?? "huggingface"] ?? PROVIDER.huggingface!;
+  return (
+    <span className={`plogo plogo-${p.kind}`} style={{ width: size, height: size }} title={title ? p.label : undefined} aria-label={p.label}>
+      {p.path ? (
+        <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden="true">
+          <path d={p.path} fill="currentColor" />
+        </svg>
+      ) : p.kind === "ollama" ? (
+        <Shapes size={size} strokeWidth={1.7} aria-hidden="true" />
+      ) : p.kind === "url" ? (
+        <Link2 size={size} strokeWidth={1.9} aria-hidden="true" />
+      ) : (
+        <span className="plogo-letter" aria-hidden="true">{(p.label[0] ?? "?").toUpperCase()}</span>
+      )}
+    </span>
+  );
+}
+
 export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: ViewId) => void }) {
   const toast = useToast();
   const [query, setQuery] = useState("");
@@ -25,12 +76,23 @@ export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: Vi
   const [loading, setLoading] = useState(false);
   const [repo, setRepo] = useState<HubRepo | null>(null);
   const [system, setSystem] = useState<SystemResponse | null>(null);
+  /** Hub repos already in the library (from each model's `repo`), so a row can
+   *  be marked installed and the list filtered by install state. */
+  const [installedRepos, setInstalledRepos] = useState<Set<string>>(new Set());
+  const [installFilter, setInstallFilter] = useState<"all" | "installed" | "available">(
+    () => (localStorage.getItem("osama.hubInstallFilter") as "all" | "installed" | "available") ?? "all",
+  );
 
   useEffect(() => {
     api.system().then(setSystem).catch(() => {});
+    api.models()
+      .then((r) => setInstalledRepos(new Set(r.models.map((m: LocalModel) => m.repo).filter(Boolean) as string[])))
+      .catch(() => {});
     loadTrending();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => { localStorage.setItem("osama.hubInstallFilter", installFilter); }, [installFilter]);
 
   useEffect(() => { localStorage.setItem("osama.hubSource", source); }, [source]);
 
@@ -82,6 +144,18 @@ export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: Vi
     }
   }
 
+  // A hub row is "installed" when the library holds a model whose recorded repo
+  // matches. HF/ModelScope ids are owner/repo; Ollama refs are name:tag — both
+  // compare directly against LocalModel.repo.
+  const isInstalled = (m: HubModel) => installedRepos.has(m.id);
+
+  const visibleModels = models.filter((m) => {
+    if (installFilter === "installed") return isInstalled(m);
+    if (installFilter === "available") return !isInstalled(m);
+    return true;
+  });
+  const installedShown = models.filter(isInstalled).length;
+
   const downloads = bus.events.filter((e) => e.type === "download").slice(-8).reverse();
 
   if (repo) {
@@ -93,9 +167,12 @@ export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: Vi
       <Card className="card-pad">
         <CardHead title="Discover models" sub="Search the Hugging Face Hub for ready-to-run GGUF models." />
         <form className="row" onSubmit={search} style={{ gap: 10 }}>
-          <select className="select" style={{ maxWidth: 180 }} value={source} onChange={(e) => setSource(e.target.value)} aria-label="Model source">
-            {HUB_SOURCES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
-          </select>
+          <span className="row" style={{ gap: 8, alignItems: "center" }}>
+            {source !== "all" && <ProviderLogo source={source} size={18} title />}
+            <select className="select" style={{ maxWidth: 180 }} value={source} onChange={(e) => setSource(e.target.value)} aria-label="Model source">
+              {HUB_SOURCES.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+            </select>
+          </span>
           <div className="search">
             <Search />
             <input
@@ -154,19 +231,45 @@ export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: Vi
       <Card className="card-pad">
         <CardHead
           title={query ? `Results for “${query}”` : "Most downloaded GGUF models"}
-          sub={`${models.length} models`}
+          sub={`${visibleModels.length} of ${models.length} models${installedShown ? ` · ${installedShown} installed` : ""}`}
           right={!query ? <Badge kind="accent"><TrendingUp size={12} /> trending</Badge> : undefined}
         />
-        {models.length === 0 && !loading ? (
-          <Empty icon={<Search size={28} />} title="No models found" sub="Try a different search term." />
+        <div className="hub-filter" role="tablist" aria-label="Filter by install state">
+          {([
+            ["all", "All", models.length],
+            ["installed", "Installed", installedShown],
+            ["available", "Not installed", models.length - installedShown],
+          ] as const).map(([id, label, count]) => (
+            <button
+              key={id}
+              role="tab"
+              aria-selected={installFilter === id}
+              className={`hub-filter-btn ${installFilter === id ? "on" : ""}`}
+              onClick={() => setInstallFilter(id)}
+            >
+              {label} <span className="faint">{count}</span>
+            </button>
+          ))}
+        </div>
+        {visibleModels.length === 0 && !loading ? (
+          <Empty
+            icon={<Search size={28} />}
+            title={installFilter === "installed" ? "Nothing here is installed yet" : models.length ? "No models match this filter" : "No models found"}
+            sub={installFilter === "installed" ? "Open a model and download a file to add it to the library." : "Try a different search term or filter."}
+          />
         ) : (
-          <div className="stack" style={{ gap: 8 }} key={models.map((m) => `${m.source ?? "hf"}:${m.id}`).join("|")}>
-            {models.map((m) => (
-              <div key={`${m.source ?? "hf"}:${m.id}`} className="tile" onClick={() => openRepo(m.id, m.source)}>
+          <div className="stack" style={{ gap: 8 }} key={visibleModels.map((m) => `${m.source ?? "hf"}:${m.id}`).join("|")}>
+            {visibleModels.map((m) => {
+              const installed = isInstalled(m);
+              return (
+              <div key={`${m.source ?? "hf"}:${m.id}`} className={`tile ${installed ? "installed" : ""}`} onClick={() => openRepo(m.id, m.source)}>
                 <div className="row" style={{ justifyContent: "space-between", gap: 10 }}>
-                  <span className="title mono" title={m.id}>{m.id}</span>
+                  <span className="row" style={{ gap: 8, minWidth: 0 }}>
+                    <ProviderLogo source={m.source} size={17} title />
+                    <span className="title mono" title={m.id}>{m.id}</span>
+                  </span>
                   <div className="row" style={{ gap: 8, flex: "none" }}>
-                    {m.source && <Badge kind="accent">{m.source}</Badge>}
+                    {installed && <Badge kind="ok"><BadgeCheck size={12} /> installed</Badge>}
                     {m.instruct && <Badge kind="info">instruct</Badge>}
                     {m.gated && <Badge kind="warn">gated</Badge>}
                   </div>
@@ -177,7 +280,8 @@ export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: Vi
                   {m.tags.slice(0, 3).map((t) => <Badge key={t}>{t}</Badge>)}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Card>

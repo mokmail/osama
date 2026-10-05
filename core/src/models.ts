@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { paths, ensureDirs } from "./paths.js";
 import { logger } from "./logger.js";
-import { readGguf, toModelCard, type ModelCard } from "./gguf.js";
+import { readGguf, toModelCard, isDraftModel, type ModelCard } from "./gguf.js";
 import { downloadFile, type DownloadProgress } from "./downloader.js";
 import { repoFiles, resolveUrl } from "./hub.js";
 import { resolveAnyAsync, type SourceId } from "./sources.js";
@@ -94,6 +94,16 @@ export function describeModel(file: string): ModelCard {
   return toModelCard(readGguf(file));
 }
 
+/**
+ * Describe a GGUF and decide whether it is servable as a main model.
+ * Draft heads are marked `draftOnly` so the UI hides them and the server's
+ * 422 guard can actually fire (it reads this flag, which nothing used to set).
+ */
+function describeWithFlags(file: string): { card: ModelCard; draftOnly: boolean } {
+  const info = readGguf(file);
+  return { card: toModelCard(info), draftOnly: isDraftModel(info) };
+}
+
 export interface AddModelOptions {
   file: string;
   repo?: string;
@@ -106,8 +116,11 @@ export function addModel(opts: AddModelOptions): LocalModel {
   if (!fs.existsSync(abs)) throw new Error(`file not found: ${abs}`);
   if (!abs.toLowerCase().endsWith(".gguf")) throw new Error("only .gguf files can be added");
   let card: ModelCard | undefined;
+  let draftOnly = false;
   try {
-    card = describeModel(abs);
+    const d = describeWithFlags(abs);
+    card = d.card;
+    draftOnly = d.draftOnly;
   } catch (err) {
     log.warn(`could not read GGUF metadata for ${abs}: ${(err as Error).message}`);
   }
@@ -123,6 +136,7 @@ export function addModel(opts: AddModelOptions): LocalModel {
     card,
     addedAt: new Date().toISOString(),
     external: !abs.startsWith(paths().models),
+    ...(draftOnly ? { draftOnly: true } : {}),
   };
   lib.models.push(model);
   writeLibrary(lib);
@@ -156,7 +170,7 @@ export function scanModelsDir(): LocalModel[] {
       else if (entry.isFile() && entry.name.toLowerCase().endsWith(".gguf") && !known.has(path.resolve(full))) {
         known.add(path.resolve(full));
         try {
-          const card = describeModel(full);
+          const { card, draftOnly } = describeWithFlags(full);
           lib.models.push({
             id: `m_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`,
             name: full.replace(/\.gguf$/i, "").replace(dir + path.sep, ""),
@@ -164,6 +178,7 @@ export function scanModelsDir(): LocalModel[] {
             sizeBytes: fs.statSync(full).size,
             card,
             addedAt: new Date().toISOString(),
+            ...(draftOnly ? { draftOnly: true } : {}),
           });
           added++;
         } catch (err) {

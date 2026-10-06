@@ -356,6 +356,8 @@ export async function* streamAgent(
     activeSkills?: string[];
     /** Session personality overlay id (see the Soul panel). */
     personality?: string;
+    /** This client's id for the run, so the UI can reattach after an unmount. */
+    runId?: string;
     maxSteps?: number;
     temperature?: number;
     top_p?: number;

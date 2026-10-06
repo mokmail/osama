@@ -4,7 +4,12 @@ import {
   Bot, Check as CheckIcon, ChevronDown, Copy, FileText, Folder, FolderOpen, GitBranch, Image as ImageIcon,
   Paperclip, Pencil, Play, RefreshCw, RotateCcw, Send, Sparkles, StopCircle, Trash2, User, X, AlertTriangle, Plus,
 } from "lucide-react";
-import { api, streamChat, streamAgent, agentApi, type AgentMessagePayload } from "../lib/api";
+import { api, agentApi, type AgentMessagePayload } from "../lib/api";
+import {
+  adoptSessionId, answerApproval, answerQuestion, attachToRun,
+  clearCompaction, clearTodos, currentSessionId, findLiveRun, getChatState,
+  newRunId, noteCompaction, resetSession, setMessages, startRun, stopRun, useChat,
+} from "../lib/runStore";
 import type { AgentQuestion, AgentStep, AgentTool, ContextBreakdown, LocalModel, ManagedProcess, MemoryStats, PromptSection, SkillMeta, SystemResponse, TodoItem, WorkspaceFile } from "../lib/types";
 import { Badge, Button, Empty, Spinner, useToast } from "../components/ui";
 import { AgentTrace, ApprovalPrompt, QuestionPrompt } from "../components/AgentTrace";
@@ -200,13 +205,33 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const [procs, setProcs] = useState<ManagedProcess[]>([]);
   const [baseUrl, setBaseUrl] = useState("http://127.0.0.1:8080");
   const [apiKey, setApiKey] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
+
+  /**
+   * THE RUN LIVES IN THE STORE, NOT IN THIS COMPONENT.
+   *
+   * Everything a turn produces — the transcript, the streaming text, the step
+   * count, the parked approval, the todo list — is read from `runStore`, which
+   * is a module singleton. Switching pages unmounts this view; the store keeps
+   * the turn. That is the whole point: a run is a user-level activity, and it
+   * must not die because the user looked at another page.
+   *
+   * `messages` is the store's transcript, and `run` carries the live status.
+   */
+  const run = useChat();
+  const messages = run.messages;
+  const streaming = run.status.running;
+  const agentStepCount = run.status.steps;
+  const approval = run.approval;
+  const question = run.question;
+  const todos = run.todos;
+  const lastCompaction = run.lastCompaction;
+  const promptInfo = run.prompt;
+
   const [input, setInput] = useState("");
   const [systemPrompt, setSystemPrompt] = useState(DEFAULT_SYSTEM);
   const [temperature, setTemperature] = useState(0.7);
   const [topP, setTopP] = useState(0.95);
   const [maxTokens, setMaxTokens] = useState<number | "">(-1);
-  const [streaming, setStreaming] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [vision, setVision] = useState<boolean | null>(null);
   const [switching, setSwitching] = useState(false);
@@ -215,10 +240,6 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const [agentic, setAgentic] = useState(false);
   const [agentTools, setAgentTools] = useState<AgentTool[]>([]);
   const [approvalMode, setApprovalMode] = useState<"ask" | "auto">("ask");
-  const [approval, setApproval] = useState<{ id: string; command: string; cwd: string } | null>(null);
-  const [question, setQuestion] = useState<AgentQuestion | null>(null);
-  const [agentStepCount, setAgentStepCount] = useState(0);
-  const [todos, setTodos] = useState<TodoItem[]>([]);
   const [toolSupport, setToolSupport] = useState<"full" | "none" | "unknown">("unknown");
   /** The current conversation's identity + the saved history list. */
   const [chatId, setChatId] = useState(() => newChatId());
@@ -239,11 +260,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const modelAnim = useRef<number | undefined>(undefined);
   /** Compaction state — drives the sidebar's "compact now" and its result note. */
   const [compacting, setCompacting] = useState(false);
-  const [lastCompaction, setLastCompaction] = useState<{ at: number; before: number; after: number; reason: string } | null>(null);
   /** Inline context readout under the composer (polled from the same meter). */
   const [inlineCtx, setInlineCtx] = useState<ContextBreakdown | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const abortRef = useRef<AbortController | null>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -279,13 +298,39 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     // reload lands exactly where the user left.
     const saved = loadActive();
     if (saved) {
-      if (Array.isArray(saved.messages) && saved.messages.length) setMessages(saved.messages as Message[]);
+      if (Array.isArray(saved.messages) && saved.messages.length && !messages.length) setMessages(saved.messages as Message[]);
       if (typeof saved.agentic === "boolean") setAgentic(saved.agentic);
       if (saved.approvalMode === "ask" || saved.approvalMode === "auto") setApprovalMode(saved.approvalMode);
       if (typeof saved.systemPrompt === "string") setSystemPrompt(saved.systemPrompt);
       if (typeof saved.temperature === "number") setTemperature(saved.temperature);
       if (typeof saved.topP === "number") setTopP(saved.topP);
       if (typeof saved.maxTokens === "number" || saved.maxTokens === "") setMaxTokens(saved.maxTokens);
+      if (saved.interrupted) setInterrupted({ runId: saved.interrupted.runId, at: saved.interrupted.at });
+    }
+
+    /**
+     * Reattach to a run this page is not currently watching.
+     *
+     * This is what makes the status survive a page switch. The store is a
+     * singleton, so on a page switch `run.status.runId` is already set and we are
+     * simply the new mount for a live run — we re-subscribe and the turn replays.
+     *
+     * A RELOAD is different: the store is cold, so there is nothing local to
+     * resume. We ask the server whether a run is alive and adopt it if so, which
+     * is the honest best effort — an SSE stream cannot be resumed from a dead
+     * process, so the server replays its buffer instead of us pretending we
+     * still have the original socket.
+     */
+    const own = getChatState().status.runId;
+    if (own && getChatState().status.running) {
+      void attachToRun(own);
+    } else {
+      void findLiveRun().then((live) => {
+        if (live) {
+          toast.push("info", "A run is still going — reattaching.");
+          void attachToRun(live.runId);
+        }
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -294,9 +339,20 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   // write of a transcript that is already in memory, debounced by React's
   // render cadence during streaming (tokens coalesce into renders).
   useEffect(() => {
-    saveActive({ messages, agentic, approvalMode, systemPrompt, temperature, topP, maxTokens });
+    // The `interrupted` mark is written while a run is live and cleared when it
+    // ends, so a reload can tell "this was mid-turn" from "this finished".
+    saveActive({
+      messages,
+      agentic,
+      approvalMode,
+      systemPrompt,
+      temperature,
+      topP,
+      maxTokens,
+      interrupted: run.status.running && run.status.runId ? { runId: run.status.runId, at: Date.now(), note: "interrupted by a reload" } : null,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, agentic, approvalMode, systemPrompt, temperature, topP, maxTokens]);
+  }, [messages, agentic, approvalMode, systemPrompt, temperature, topP, maxTokens, run.status.running, run.status.runId]);
 
   useEffect(() => {
     if (!agentic || agentTools.length) return;
@@ -318,6 +374,12 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const loading = !!serverProcess && !healthReady;
   const failure = useLoadFailure(procs);
   const [dismissedFailure, setDismissedFailure] = useState<number | null>(null);
+  /**
+   * A turn that a reload cut off. Not a live run — an SSE stream cannot be
+   * resumed from a dead process — so the honest thing is to say so and offer to
+   * retry, rather than show a half-finished reply as if it were complete.
+   */
+  const [interrupted, setInterrupted] = useState<{ runId: string; at: number } | null>(null);
   const showFailure = failure && !loading && !streaming && dismissedFailure !== failure.since;
 
   useEffect(() => {
@@ -366,10 +428,10 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       saveHistory(next);
     }
     setChatId(newChatId());
-    setMessages([]);
-    setApproval(null);
-    setQuestion(null);
-    setAgentStepCount(0);
+    // The store clears the transcript, the parked prompts and the run status in
+    // one step; the session id is what a reload will restore.
+    resetSession();
+    adoptSessionId(currentSessionId());
     setTodoSupportReset();
     clearActive();
     focusInput();
@@ -388,9 +450,6 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     if (!c) return;
     setChatId(c.id);
     setMessages(c.messages as Message[]);
-    setApproval(null);
-    setQuestion(null);
-    setAgentStepCount(0);
   }
 
   /** Delete a conversation from history (and clear the active one if it is). */
@@ -405,8 +464,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     }
   }
 
+  /** Clear the run's task list via the store and reset tool-support detection. */
   function setTodoSupportReset() {
-    setTodos([]);
+    clearTodos();
     setToolSupport("unknown");
   }
 
@@ -449,7 +509,6 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   // The soul lives on the server; this is only the session's chosen overlay, so
   // it survives a reload the same way the active skills do.
   const [personality, setPersonality] = useState<string>(loadPersonality());
-  const [promptInfo, setPromptInfo] = useState<{ sections: PromptSection[]; chars: number; personality: string; memory: MemoryStats } | null>(null);
 
   // Persist the personality overlay the way the active skills are persisted.
   useEffect(() => {
@@ -594,170 +653,42 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
    * from the text already shown); `placeholder` inserts a user message the
    * model should answer with no new input from the box.
    */
-  async function runTurn(opts: {
-    base: Message[];
-    seed?: string;
-    placeholder?: Message;
-    label?: string;
-  }) {
+  /**
+   * Run one turn.
+   *
+   * The actual streaming now happens in `runStore`, which is a module singleton.
+   * This function's only job is to hand the store what it needs and return — it
+   * deliberately does NOT await the answer, because the answer outlives this
+   * component. That is what makes a page switch harmless.
+   *
+   * `base` is the conversation up to but NOT including the reply being produced;
+   * `seed` pre-fills the assistant bubble (a "continue" starts from shown text);
+   * `placeholder` inserts a user message the model answers with no new input.
+   */
+  function runTurn(opts: { base: Message[]; seed?: string; placeholder?: Message; label?: string }) {
     if (busy) return;
     const { base, seed = "", placeholder } = opts;
     const history = placeholder ? [...base, placeholder] : base;
-    const assistant: Message = agentic
-      ? { role: "assistant", content: seed, steps: [] }
-      : { role: "assistant", content: seed };
-    setMessages([...history, assistant]);
-    setStreaming(true);
-    if (agentic) setAgentStepCount(0);
-    const ac = new AbortController();
-    abortRef.current = ac;
 
-    /** Patch the assistant bubble we just appended (always the last one). */
-    const patch = (fn: (m: Message) => Message): void => {
-      setMessages((m) => {
-        const copy = [...m];
-        const last = copy[copy.length - 1];
-        if (last) copy[copy.length - 1] = fn(last);
-        return copy;
-      });
-    };
+    // The store keys the run by a client-owned id so a remount can reattach.
+    const runId = newRunId();
+    adoptSessionId(currentSessionId());
 
-    try {
-      const payloadMessages = history
-        .filter((m) => m.role !== "assistant" || m.content.trim())
-        .map((m) => ({ role: m.role as "user" | "assistant", content: buildContent(m, vision === true) as string }));
-
-      if (!agentic) {
-        // Plain chat: the model gets the whole conversation with the system
-        // prompt (or its default) and streams text back.
-        let acc = seed;
-        for await (const delta of streamChat(
-          {
-            model: "local",
-            messages: [
-              { role: "system", content: systemPrompt.trim() || DEFAULT_SYSTEM },
-              ...payloadMessages,
-            ],
-            stream: true as const,
-            temperature,
-            top_p: topP,
-            ...(maxTokens === "" ? {} : { max_tokens: maxTokens }),
-          },
-          { baseUrl, apiKey: apiKey || undefined, signal: ac.signal },
-        )) {
-          acc += delta;
-          patch((m) => ({ ...m, content: acc }));
-        }
-        if (!acc.trim()) {
-          patch((m) => ({ ...m, content: "_(empty response — is the server still loading the model?)_" }));
-        }
-        return;
-      }
-
-      // Agentic: the server owns the loop; events arrive as the turn runs.
-      let acc = seed;
-      for await (const ev of streamAgent(
-        {
-          baseUrl,
-          apiKey: apiKey || undefined,
-          model: "local",
-          system: systemPrompt.trim() || undefined,
-          personality,
-          messages: payloadMessages as never,
-          approval: approvalMode,
-          activeSkills,
-          temperature,
-          top_p: topP,
-          ...(maxTokens === "" ? {} : { max_tokens: maxTokens as number }),
-        },
-        { signal: ac.signal },
-      )) {
-        switch (ev.type) {
-          case "prompt":
-            // The server assembled the prompt for this turn — record what the
-            // model was actually told, so it can be inspected from the chat.
-            setPromptInfo({ sections: ev.sections, chars: ev.chars, personality: ev.personality, memory: ev.memory });
-            break;
-
-          case "assistant_delta":
-            acc += ev.text;
-            patch((m) => ({ ...m, content: acc }));
-            break;
-
-          case "step":
-            setAgentStepCount(ev.index + 1);
-            break;
-
-          case "tool_call":
-            patch((m) => ({
-              ...m,
-              steps: [...(m.steps ?? []), { id: ev.id, kind: "call" as const, name: ev.name, args: ev.args }],
-            }));
-            break;
-
-          case "tool_result":
-            patch((m) => {
-              const steps = [...(m.steps ?? [])];
-              const at = steps.findIndex((s) => s.id === ev.id && s.kind === "call");
-              const entry = {
-                id: ev.id, kind: "result" as const, name: ev.name,
-                summary: ev.summary, content: ev.content, ok: ev.ok, durationMs: ev.durationMs,
-              };
-              if (at >= 0) steps[at] = entry;
-              else steps.push(entry);
-              return { ...m, steps };
-            });
-            break;
-
-          case "denied":
-            patch((m) => ({
-              ...m,
-              steps: (m.steps ?? []).map((s) => (s.id === ev.id ? { ...s, kind: "denied" as const, ok: false } : s)),
-            }));
-            break;
-
-          case "compaction":
-            setLastCompaction({ at: Date.now(), before: ev.before, after: ev.after, reason: ev.reason });
-            toast.push("info", `Compacted: ${ev.before - ev.after} older turn(s) summarised (${ev.reason})`);
-            break;
-
-          case "todos":
-            setTodos(ev.todos);
-            break;
-
-          case "question":
-            setQuestion({ id: ev.id, question: ev.question, options: ev.options });
-            break;
-
-          case "approval_request":
-            setApproval({ id: ev.id, command: ev.command, cwd: ev.cwd });
-            break;
-
-          case "final":
-            acc = ev.text || acc;
-            patch((m) => ({ ...m, content: acc, stepCount: ev.steps }));
-            break;
-
-          case "error":
-            toast.push("err", `Agent: ${ev.message}`);
-            patch((m) => ({ ...m, content: acc || `_(agent stopped: ${ev.message})_` }));
-            break;
-        }
-      }
-      if (!acc.trim()) {
-        patch((m) => ({ ...m, content: "_(the model finished without saying anything)_" }));
-      }
-    } catch (e) {
-      if (!ac.signal.aborted) {
-        toast.push("err", `Chat failed: ${(e as Error).message}`);
-      }
-    } finally {
-      setStreaming(false);
-      setApproval(null);
-      setQuestion(null);
-      abortRef.current = null;
-      focusInput();
-    }
+    startRun({
+      runId,
+      baseUrl,
+      apiKey: apiKey || undefined,
+      agentic,
+      system: systemPrompt.trim() || undefined,
+      personality,
+      activeSkills,
+      approval: approvalMode,
+      temperature,
+      top_p: topP,
+      ...(maxTokens === "" ? {} : { max_tokens: maxTokens as number }),
+      history: history.map((m) => ({ role: m.role, content: m.content, attachments: m.attachments, steps: m.steps, stepCount: m.stepCount })),
+      seed,
+    });
   }
 
   /** Send what is in the composer. */
@@ -817,7 +748,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
 
   /** Delete one message from the transcript. */
   function deleteMessage(index: number) {
-    setMessages((m) => m.filter((_, i) => i !== index));
+    setMessages(messages.filter((_, i) => i !== index));
     toast.push("ok", "Message removed.");
   }
 
@@ -858,25 +789,23 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   }
 
   /** Answer a parked approval; the server-side loop resumes from it. */
-  async function answerApproval(allow: boolean) {
+  async function onAnswerApproval(allow: boolean) {
     const a = approval;
     if (!a) return;
-    setApproval(null);
+    await answerApproval(a.id, allow);
     try {
-      await agentApi.approve(a.id, allow);
     } catch (e) {
       toast.push("err", `Could not answer the approval: ${(e as Error).message}`);
     }
   }
 
   /** Answer a parked question; the loop resumes from it. */
-  async function answerQuestion(text: string) {
+  async function onAnswerQuestion(text: string) {
     const q = question;
     if (!q) return;
-    setQuestion(null);
     // Show the exchange in the transcript, as the assistant's trace.
     try {
-      await agentApi.answer(q.id, text);
+      await answerQuestion(q.id, text);
     } catch (e) {
       toast.push("err", `Could not deliver the answer: ${(e as Error).message}`);
     }
@@ -1131,7 +1060,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
           rows={1}
         />
         {streaming ? (
-          <button className="send" onClick={() => abortRef.current?.abort()} title="Stop">
+          <button className="send" onClick={() => stopRun()} title="Stop">
             <StopCircle size={16} />
           </button>
         ) : (
@@ -1217,6 +1146,39 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         className={`chat-scroll ${landing ? "chat-landing" : ""}`}
         onClick={() => focusInput()}
       >
+        {interrupted && !streaming && (
+          <div className="runcut" role="status">
+            <AlertTriangle size={13} />
+            <span>
+              This reply was cut off by a page reload — the model may have finished after you left. Nothing below is
+              guaranteed complete.
+            </span>
+            <button
+              className="btn ghost sm"
+              onClick={() => {
+                const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+                // Drop the truncated reply and re-run the same turn.
+                const base = lastAssistant ? messages.slice(0, messages.lastIndexOf(lastAssistant)) : messages;
+                setInterrupted(null);
+                clearActive();
+                runTurn({ base, label: "retry after an interrupted turn" });
+              }}
+            >
+              Retry this reply
+            </button>
+            <button
+              className="btn ghost sm"
+              onClick={() => {
+                setInterrupted(null);
+                clearActive();
+                toast.push("info", "Kept the partial reply.");
+              }}
+            >
+              Keep it
+            </button>
+          </div>
+        )}
+
         {landing ? null : startingServer ? (
           <Empty
             icon={<Spinner />}
@@ -1326,14 +1288,14 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
                       <ApprovalPrompt
                         command={approval.command}
                         cwd={approval.cwd}
-                        onAnswer={answerApproval}
+                        onAnswer={onAnswerApproval}
                       />
                     )}
                     {m.role === "assistant" && question && last && (
                       <QuestionPrompt
                         question={question.question}
                         options={question.options}
-                        onAnswer={answerQuestion}
+                        onAnswer={onAnswerQuestion}
                       />
                     )}
                   </div>
@@ -1395,7 +1357,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         messages: compactMessages,
       });
       if (r.compacted) {
-        setLastCompaction({ at: Date.now(), before: r.before, after: r.after, reason: r.reason });
+        noteCompaction({ at: Date.now(), before: r.before, after: r.after, reason: r.reason });
         // Rebuild the visible messages from the compacted payload: keep the
         // attachment metadata the UI needs by re-deriving from the summary.
         const rebuilt = r.messages.map((m) => ({
@@ -1407,7 +1369,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         setMessages(rebuilt);
         toast.push("ok", `Compacted: ${r.before} → ${r.after} messages`);
       } else {
-        setLastCompaction(null);
+        clearCompaction();
         toast.push("info", r.reason || "nothing to compact");
       }
     } catch (e) {

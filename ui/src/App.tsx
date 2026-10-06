@@ -16,6 +16,7 @@ import { ChatView } from "./views/Chat";
 import { ProcessesView } from "./views/Processes";
 import { CreateView } from "./views/Create";
 import { ArtifactsView } from "./views/Artifacts";
+import { RunIndicator } from "./components/RunIndicator";
 
 export type ViewId =
   | "dashboard"
@@ -182,6 +183,9 @@ function Shell() {
           </button>
           <h1>{title}</h1>
           <div className="spacer" />
+          {/* A turn keeps running when you leave the chat; this says so from
+              whatever page you are on, and is the way back to it. */}
+          <RunIndicator onOpenChat={() => setView("chat")} />
           {system && (
             <div className="row small faint mono" style={{ gap: 14 }}>
               <span title={system.system.cpuModel}>

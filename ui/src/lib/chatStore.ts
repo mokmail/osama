@@ -33,6 +33,16 @@ export interface PersistedChatState {
   temperature: number;
   topP: number;
   maxTokens: number | "";
+  /**
+   * Set while a turn was streaming when the page went away.
+   *
+   * An SSE stream cannot be resumed from a dead process, so a reload cannot
+   * continue a run it was in the middle of. Recording that it *was* running is
+   * the honest alternative to pretending the answer arrived: on the next load the
+   * chat says the turn was interrupted and offers to retry, instead of showing a
+   * half-finished reply as if it were complete.
+   */
+  interrupted?: { runId: string; at: number; note: string } | null;
 }
 
 const ACTIVE_KEY = "osama.chat.active.v1";

@@ -136,6 +136,31 @@ npm run build        # core + server + ui
 npm run typecheck    # workspace-wide tsc
 ```
 
+## Runs survive a page switch
+
+A turn is a **user-level activity, not a view-level one**. Leaving the chat used
+to unmount the view, which aborted the request and discarded the answer —
+switching to the Dashboard mid-reply killed it. Two pieces fix that:
+
+- **The server owns the turn.** `POST /api/agent` starts a run keyed by a
+  client-supplied `runId`; the loop does *not* abort when the SSE request closes.
+  It buffers every event and ends only on an explicit stop. `POST
+  /api/agent/attach?runId=…` replays the buffer and then continues live, so a
+  client that comes back gets the whole turn in order. `GET /api/agent/status`
+  says what is alive and whether it is parked on the user.
+- **The client keeps the run outside React.** `ui/src/lib/runStore.ts` is a module
+  singleton holding the transcript, the live status and the stream, so remounting
+  the view re-subscribes instead of restarting. The chat reads from it rather than
+  owning it.
+
+A **RunIndicator** in the top bar shows a live run from any page — including when
+the turn is parked on an approval or a question — and is the way back to it.
+
+Reload is a *different* case and is handled honestly: an SSE stream cannot be
+resumed from a process that is gone, so a reload does not pretend the answer
+arrived. The chat marks the turn interrupted and offers to retry it, rather than
+showing a half-finished reply as if it were complete.
+
 ## Verifying
 
 Three checks, in rising order of strength:

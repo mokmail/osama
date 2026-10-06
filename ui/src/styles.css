@@ -1529,3 +1529,34 @@ kbd {
   background: transparent; border: 0; color: var(--text); cursor: pointer;
   padding: 3px 4px; text-align: left; font-size: 12px;
 }
+
+/* ------------------------------------------------------------- run chip --- */
+/* Lives in the topbar, so a running turn is visible from every page. Renders
+   nothing when idle; small enough to ignore while it waits. */
+
+.runchip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 999px; font-size: 11px;
+  border: 1px solid var(--border); background: transparent; color: var(--faint);
+  cursor: pointer; white-space: nowrap;
+}
+.runchip:hover { color: var(--text); border-color: var(--accent); }
+.runchip.live { color: var(--accent); border-color: var(--accent); }
+.runchip.wait { color: var(--warn, #d08770); border-color: var(--warn, #d08770); }
+.runchip.err { color: var(--danger, #bf616a); border-color: var(--danger, #bf616a); }
+.runchip-icon { display: inline-flex; }
+.runchip-label { font-weight: 500; }
+.runchip-time, .runchip-steps { opacity: .75; font-variant-numeric: tabular-nums; }
+.runchip-steps::before { content: "· "; }
+.runchip-go { opacity: .8; }
+.runchip-spin { animation: runspin 1.1s linear infinite; }
+@keyframes runspin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .runchip-spin { animation: none; } }
+
+.runcut {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  margin: 8px 0; padding: 8px 11px; border-radius: 6px; font-size: 12px;
+  border: 1px solid color-mix(in srgb, var(--warn, #d08770) 45%, var(--border));
+  color: var(--warn, #d08770);
+}
+.runcut span { flex: 1; min-width: 200px; color: var(--text); }

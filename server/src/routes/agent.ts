@@ -33,6 +33,81 @@ interface PendingQuestion extends core.PendingQuestion {
 /** Live turns that accept steering notes (mid-run course correction). */
 export const activeSteers = new Map<string, core.SteerQueue>();
 
+/**
+ * A turn that is currently running.
+ *
+ * Keyed by the `runId` the CLIENT generates and sends. The client owns the id
+ * on purpose: it is what lets the UI reattach to a run it started before it was
+ * unmounted, and what stops a reload from attaching to a different turn.
+ *
+ * `events` is the replay buffer. Every event is kept, so a client that attaches
+ * late — after a page switch unmounted the chat — receives the whole turn so
+ * far in order, then continues live. That ordering is why `attachTurn` sends the
+ * buffer and subscribes to `listeners` in the same synchronous block.
+ */
+interface LiveTurn {
+  runId: string;
+  sessionId: string;
+  startedAt: number;
+  status: "running" | "awaiting_approval" | "awaiting_answer" | "done" | "error" | "cancelled";
+  events: unknown[];
+  /** The responses currently attached. Held as responses (not callbacks) so the
+   *  turn can END them when it finishes — otherwise every run leaks an open
+   *  HTTP connection until the client goes away. */
+  listeners: Set<http.ServerResponse>;
+  abort: AbortController;
+  /** The parked prompt, if the turn is waiting on the user right now. */
+  pending: { kind: "approval"; id: string; command: string; cwd: string } | { kind: "question"; id: string; question: string; options?: string[] } | null;
+}
+
+/** Live runs by runId. */
+export const liveTurns = new Map<string, LiveTurn>();
+/**
+ * Which runId owns which parked approval / question, so a reattaching client can
+ * be told "this turn is waiting on you" without re-running the loop.
+ */
+export const turnOfApproval = new Map<string, string>();
+export const turnOfQuestion = new Map<string, string>();
+
+/** Drop a finished turn after a grace period, so a late reattach still sees it. */
+const TURN_GRACE_MS = 60_000;
+
+function endTurn(t: LiveTurn, status: LiveTurn["status"]): void {
+  t.status = status;
+  t.pending = null;
+  // Close every attached response: the turn is over, and an SSE stream that is
+  // never ended holds the connection open for the life of the server.
+  for (const res of t.listeners) {
+    try {
+      res.end();
+    } catch {
+      /* already gone */
+    }
+  }
+  t.listeners.clear();
+  // Keep the buffer briefly: a client that unmounted mid-turn and remounts
+  // within the grace window must still be able to replay the ending.
+  setTimeout(() => {
+    const cur = liveTurns.get(t.runId);
+    if (cur === t && cur.status !== "running") liveTurns.delete(t.runId);
+  }, TURN_GRACE_MS).unref?.();
+}
+
+/**
+ * Subscribe a client to a running turn: replay, then live.
+ *
+ * Returns a detach function. The replay and the subscription happen in one
+ * synchronous block so no event can slip between them; `attachTurn` is
+ * synchronous for exactly that reason and must stay that way.
+ */
+export function attachTurn(runId: string, res: http.ServerResponse): (() => void) | null {
+  const t = liveTurns.get(runId);
+  if (!t) return null;
+  for (const ev of t.events) sseSend(res, ev);
+  t.listeners.add(res);
+  return () => t.listeners.delete(res);
+}
+
 export const agentRoutes: RouteModule = (deps) => {
   const pendingApprovals = new Map<string, PendingApproval>();
   const pendingQuestions = new Map<string, PendingQuestion>();
@@ -66,25 +141,42 @@ export const agentRoutes: RouteModule = (deps) => {
    * Ask the user to approve a command. Parks the loop on a promise; the answer
    * arrives on `POST /api/agent/approve/:id`, or the request times out into a
    * denial so an unattended agent cannot run commands by default.
+   *
+   * `res` is a getter, not a response: the prompt must be written to whichever
+   * client is attached at that moment. A page switch leaves the turn parked, and
+   * the client that comes back is a different response object.
    */
   function requestApproval(
     areq: { command: string; cwd: string },
     mode: "ask" | "auto",
-    res: http.ServerResponse,
+    getRes: () => http.ServerResponse,
     signal: AbortSignal,
+    runId: string,
+    emit: (ev: unknown) => void,
   ): Promise<boolean> {
     if (mode === "auto") return Promise.resolve(true);
 
     const id = `ap_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     const payload = { id, command: areq.command, cwd: areq.cwd, timeoutMs: APPROVAL_TIMEOUT_MS };
+    turnOfApproval.set(id, runId);
+    // The live turn records the real id so a reattaching client can be told what
+    // it is parked on; the bus event reaches any other open tab.
+    const t = liveTurns.get(runId);
+    if (t?.pending?.kind === "approval") t.pending.id = id;
     deps.broadcast("agent_approval", payload);
-    sseSend(res, { type: "approval_request", ...payload });
+    emit({ type: "approval_request", ...payload });
+    try {
+      sseSend(getRes(), { type: "approval_request", ...payload });
+    } catch {
+      /* nobody attached right now — the buffer holds it for when they are */
+    }
 
     return new Promise<boolean>((resolve) => {
       // `finish` owns the cleanup so it is identical however it is reached —
       // the route, the timeout, or an abort. The route only calls `resolve`.
       const finish = (allow: boolean): void => {
         pendingApprovals.delete(id);
+        turnOfApproval.delete(id);
         clearTimeout(timer);
         resolve(allow);
       };
@@ -100,23 +192,37 @@ export const agentRoutes: RouteModule = (deps) => {
    * ask_user_question: parks the loop the same way an approval does, pushes the
    * question over SSE and the event bus, and returns the user's answer.
    */
-  function askTheUser(question: core.PendingQuestion, timeoutMs: number, res: http.ServerResponse, signal: AbortSignal): Promise<string | null> {
+  function askTheUser(
+    question: core.PendingQuestion,
+    timeoutMs: number,
+    getRes: () => http.ServerResponse,
+    signal: AbortSignal,
+    runId: string,
+    emit: (ev: unknown) => void,
+  ): Promise<string | null> {
     const finish = (owner: PendingQuestion | undefined, answer: string | null): void => {
       if (!owner) return;
       clearTimeout(owner.timer);
       pendingQuestions.delete(question.id);
+      turnOfQuestion.delete(question.id);
       owner.resolve(answer);
     };
     const ssePayload = { id: question.id, question: question.question, options: question.options, timeoutMs };
+    turnOfQuestion.set(question.id, runId);
     deps.broadcast("agent_question", ssePayload);
-    sseSend(res, { type: "question", ...ssePayload });
+    emit({ type: "question", ...ssePayload });
+    try {
+      sseSend(getRes(), { type: "question", ...ssePayload });
+    } catch {
+      /* nobody attached — the buffer holds it */
+    }
 
     return new Promise<string | null>((resolve) => {
       const owner: PendingQuestion = {
         ...question,
         resolve,
         timer: setTimeout(() => finish(owner, null), timeoutMs),
-        res,
+        res: getRes(),
       };
       pendingQuestions.set(question.id, owner);
       if (signal.aborted) finish(owner, null);
@@ -559,90 +665,194 @@ export const agentRoutes: RouteModule = (deps) => {
 
       if (!history.length) return fail(res, 400, new Error("messages is required"));
 
-      // Abort the loop when the browser disconnects, so tools stop immediately.
-      // Must be `res`, not `req`: `req` emits "close" as soon as the request
-      // body has been read, which would abort the turn before it ever runs.
-      const ac = new AbortController();
-      res.on("close", () => {
-        if (!res.writableEnded) ac.abort();
-      });
+      // The client names the run, so it can reattach after an unmount. A missing
+      // runId gets one minted here, which keeps older clients working.
+      const runId = typeof body.runId === "string" && body.runId.trim() ? body.runId.trim() : `r${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 
-      const approval = {
-        approve: (areq: { command: string; cwd: string }) => requestApproval(areq, approvalMode, res, ac.signal),
+      // One turn per runId: a duplicate POST for a live run attaches instead of
+      // starting a second loop against the same conversation.
+      const existing = liveTurns.get(runId);
+      if (existing && existing.status === "running") {
+        sseOpen(res);
+        sseSend(res, { type: "turn", id: runId, resumed: true });
+        const detach = attachTurn(runId, res);
+        req.on("close", () => detach?.());
+        return;
+      }
+
+      const ac = new AbortController();
+      const turn: LiveTurn = {
+        runId,
+        sessionId: core.newSessionId(),
+        startedAt: Date.now(),
+        status: "running",
+        events: [],
+        listeners: new Set(),
+        abort: ac,
+        pending: null,
+      };
+      liveTurns.set(runId, turn);
+
+      /** Record every event and fan it out to whoever is attached right now. */
+      const emit = (ev: unknown): void => {
+        turn.events.push(ev);
+        for (const res of turn.listeners) sseSend(res, ev);
       };
 
-      // Mid-turn steering: notes POSTed to /api/agent/steer/:turn are drained
-      // between the loop's steps. Registered BEFORE sseOpen so a note that
-      // arrives during the first model call is not lost.
-      const turnId = `t${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
-      const steer = core.createSteerQueue();
-      activeSteers.set(turnId, steer);
+      // The response the turn's approval/question prompts are sent to. It is
+      // re-pointed at whichever client is attached, so a prompt reaches the UI
+      // that is actually on screen — and reaches the replay buffer regardless.
+      let promptRes = res;
 
       sseOpen(res);
-      sseSend(res, { type: "turn", id: turnId });
-      try {
-        agentTodos = [];
-        // one durable session per turn
-        const sessionId = core.newSessionId();
-        appendUserMessage(sessionId, workspace, history, body.system);
+      sseSend(res, { type: "turn", id: runId });
+      const detach = attachTurn(runId, res);
+      req.on("close", () => detach?.());
 
-        // The prompt is assembled inside the loop; surface its section breakdown
-        // to the client so the user can see exactly what the model was told.
-        const personality = typeof body.personality === "string" ? body.personality : undefined;
-        let announced = false;
+      /**
+       * The loop does NOT listen to this request's lifetime.
+       *
+       * A page switch unmounts the chat and closes the SSE request; if the turn
+       * aborted with it, switching pages mid-answer would kill the run — which is
+       * the whole bug. The turn keeps going and buffers its events, and a client
+       * that comes back replays them. Only an explicit stop cancels it.
+       */
+      const approval = {
+        approve: (areq: { command: string; cwd: string }) => {
+          turn.pending = { kind: "approval", id: "", command: areq.command, cwd: areq.cwd };
+          turn.status = "awaiting_approval";
+          return requestApproval(areq, approvalMode, () => promptRes, ac.signal, runId, emit);
+        },
+      };
 
-        for await (const ev of core.runAgent({
-          transport: openaiTransport({ base, apiKey }),
-          model,
-          history,
-          system: typeof body.system === "string" ? body.system : undefined,
-          personality,
-          workspace,
-          maxSteps: Number.isFinite(body.maxSteps) ? Number(body.maxSteps) : undefined,
-          approval,
-          signal: ac.signal,
-          temperature: typeof body.temperature === "number" ? body.temperature : undefined,
-          top_p: typeof body.top_p === "number" ? body.top_p : undefined,
-          max_tokens: typeof body.max_tokens === "number" ? body.max_tokens : undefined,
-          // The context tools measure against the server this turn actually uses.
-          meter: core.createMeter(base),
-          injectMemory: body.memory !== false,
-          injectSkills: body.skills !== false,
-          activeSkills: Array.isArray(body.activeSkills) ? body.activeSkills.map(String).slice(0, 12) : undefined,
-          todos: agentTodos,
-          sessionId,
-          askUser: (question, timeoutMs) => askTheUser(question, timeoutMs, res, ac.signal),
-          web: { search: webSearch, fetch: webFetch },
-          steer,
-          allowDelegate: body.delegate !== false && approvalMode === "auto",
-          onPrompt: (built) => {
-            if (announced) return;
-            announced = true;
-            sseSend(res, {
-              type: "prompt",
-              personality: personality ?? "none",
-              sections: built.sections,
-              chars: built.prompt.length,
-              memory: built.memory,
-            });
-          },
-          compactApprove: async (info) =>
-            requestApproval({ command: `compact ${info.older} older message(s)`, cwd: workspace }, approvalMode, res, ac.signal),
-        })) {
-          sseSend(res, ev);
-          // The task list changed — let the UI update without another round-trip.
-          if (ev.type === "tool_result" && ev.name === "write_todo") {
-            core.appendEvents(sessionId, workspace, [{ kind: "todo", data: { todos: agentTodos } }]);
-            sseSend(res, { type: "todos", todos: agentTodos });
+      const steer = core.createSteerQueue();
+      activeSteers.set(runId, steer);
+
+      void (async () => {
+        try {
+          agentTodos = [];
+          appendUserMessage(turn.sessionId, workspace, history, body.system);
+
+          const personality = typeof body.personality === "string" ? body.personality : undefined;
+          let announced = false;
+
+          for await (const ev of core.runAgent({
+            transport: openaiTransport({ base, apiKey }),
+            model,
+            history,
+            system: typeof body.system === "string" ? body.system : undefined,
+            personality,
+            workspace,
+            maxSteps: Number.isFinite(body.maxSteps) ? Number(body.maxSteps) : undefined,
+            approval,
+            signal: ac.signal,
+            temperature: typeof body.temperature === "number" ? body.temperature : undefined,
+            top_p: typeof body.top_p === "number" ? Number(body.top_p) : undefined,
+            max_tokens: typeof body.max_tokens === "number" ? Number(body.max_tokens) : undefined,
+            meter: core.createMeter(base),
+            injectMemory: body.memory !== false,
+            injectSkills: body.skills !== false,
+            activeSkills: Array.isArray(body.activeSkills) ? body.activeSkills.map(String).slice(0, 12) : undefined,
+            todos: agentTodos,
+            sessionId: turn.sessionId,
+            askUser: (question, timeoutMs) => {
+              turn.pending = { kind: "question", id: question.id, question: question.question, options: question.options };
+              turn.status = "awaiting_answer";
+              return askTheUser(question, timeoutMs, () => promptRes, ac.signal, runId, emit);
+            },
+            web: { search: webSearch, fetch: webFetch },
+            steer,
+            allowDelegate: body.delegate !== false && approvalMode === "auto",
+            onPrompt: (built) => {
+              if (announced) return;
+              announced = true;
+              emit({
+                type: "prompt",
+                personality: personality ?? "none",
+                sections: built.sections,
+                chars: built.prompt.length,
+                memory: built.memory,
+              });
+            },
+            compactApprove: async (info) => {
+              turn.pending = { kind: "approval", id: "", command: `compact ${info.older} older message(s)`, cwd: workspace };
+              turn.status = "awaiting_approval";
+              return requestApproval(
+                { command: `compact ${info.older} older message(s)`, cwd: workspace },
+                approvalMode,
+                () => promptRes,
+                ac.signal,
+                runId,
+                emit,
+              );
+            },
+          })) {
+            emit(ev);
+            if (ev.type === "tool_result" && ev.name === "write_todo") {
+              core.appendEvents(turn.sessionId, workspace, [{ kind: "todo", data: { todos: agentTodos } }]);
+              emit({ type: "todos", todos: agentTodos });
+            }
+            if (ev.type === "final" || ev.type === "error") break;
           }
-          if (ev.type === "final" || ev.type === "error") break;
+          endTurn(turn, ac.signal.aborted ? "cancelled" : "done");
+        } catch (e) {
+          emit({ type: "error", message: String((e as Error).message) });
+          endTurn(turn, "error");
+        } finally {
+          activeSteers.delete(runId);
         }
-      } catch (e) {
-        sseSend(res, { type: "error", message: String((e as Error).message) });
-      } finally {
-        activeSteers.delete(turnId);
+      })();
+
+      // The response stays open and is fed by `emit`; it is not the owner of the
+      // turn. Keeping it open means `promptRes` still has a client to write to.
+      promptRes = res;
+    }),
+
+    /**
+     * Attach to a running turn — the endpoint that makes a page switch harmless.
+     *
+     * The client POSTs the runId it is holding; if that turn is still alive it
+     * gets the full event buffer, then the live stream. If it has already
+     * finished, `404` with the final status tells the client to stop waiting
+     * rather than to re-run anything.
+     */
+    route("POST", "/api/agent/attach", ({ res, url }) => {
+      const runId = q(url, "runId") ?? "";
+      const t = liveTurns.get(runId);
+      if (!t) {
+        json(res, 404, { error: "no such turn — it finished, or the engine restarted", runId });
+        return;
       }
-      res.end();
+      sseOpen(res);
+      sseSend(res, { type: "turn", id: runId, resumed: true, status: t.status });
+      if (t.pending) sseSend(res, t.pending.kind === "approval" ? { type: "approval_request", ...t.pending, timeoutMs: APPROVAL_TIMEOUT_MS } : { type: "question", ...t.pending });
+      const detach = attachTurn(runId, res);
+      res.on("close", () => detach?.());
+      void t;
+    }),
+
+    /** What the UI needs to restore on remount: is a run alive, and is it waiting on me? */
+    route("GET", "/api/agent/status", ({ res }) => {
+      const runs = [...liveTurns.values()].map((t) => ({
+        runId: t.runId,
+        sessionId: t.sessionId,
+        startedAt: t.startedAt,
+        status: t.status,
+        events: t.events.length,
+        pending: t.pending,
+      }));
+      json(res, 200, { runs, count: runs.length });
+    }),
+
+    /** Explicitly stop a turn. The only thing that cancels one. */
+    route("POST", "/api/agent/stop", async ({ req, res }) => {
+      const body = await readBody(req).catch(() => ({}) as Record<string, unknown>);
+      const runId = String(body.runId ?? "");
+      const t = liveTurns.get(runId);
+      if (!t) return fail(res, 404, new Error("no such turn"));
+      t.abort.abort();
+      endTurn(t, "cancelled");
+      json(res, 200, { ok: true, runId });
     }),
 
     /**

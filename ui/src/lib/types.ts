@@ -328,6 +328,81 @@ export interface ServerMetrics {
   error?: string;
 }
 
+/* ---------------------------------------------------------------- ollama provider */
+
+/** One model served by the user's local Ollama daemon. */
+export interface OllamaModel {
+  /** API name, e.g. `qwen3:8b`. */
+  name: string;
+  size: number;
+  modifiedAt: string;
+  family?: string;
+  families?: string[];
+  parameterSize?: string;
+  quantization?: string;
+  contextLength?: number;
+  /** Ollama capability tags, e.g. ["tools", "vision", "thinking"]. */
+  capabilities?: string[];
+  digest?: string;
+}
+
+export interface OllamaStatus {
+  reachable: boolean;
+  url: string;
+  version?: string;
+  models: OllamaModel[];
+  error?: string;
+  hasModels: boolean;
+}
+
+/* ------------------------------------------------------------------ mcp */
+
+export type McpTransport = "stdio" | "http";
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  transport: McpTransport;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
+  url?: string;
+  headers?: Record<string, string>;
+  enabled: boolean;
+  /** Trusted servers' tools skip the approval gate. */
+  trusted: boolean;
+}
+
+export interface McpServerStatus {
+  config: McpServerConfig;
+  connected: boolean;
+  toolCount: number;
+  error?: string;
+}
+
+/** A tool advertised by a connected MCP server. */
+export interface McpToolDef {
+  serverId: string;
+  serverName: string;
+  name: string;
+  qualifiedName: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  trusted: boolean;
+}
+
+/** A one-click MCP server template. */
+export interface McpPreset {
+  name: string;
+  description: string;
+  transport: McpTransport;
+  command?: string;
+  args?: string[];
+  url?: string;
+  envKeys?: string[];
+}
+
 /* ---------------------------------------------------------------- agentic mode */
 
 /** A tool the model may call while agentic mode is on. */

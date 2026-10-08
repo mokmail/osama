@@ -136,11 +136,13 @@ export function QuestionPrompt({
  * is a real refusal rather than a UI-only gesture.
  */
 export function ApprovalPrompt({
-  command, cwd, onAnswer, busy,
+  command, cwd, onAnswer, onAllowAll, busy,
 }: {
   command: string;
   cwd: string;
   onAnswer: (allow: boolean) => void;
+  /** Approve this and every later command this session without asking again. */
+  onAllowAll?: () => void;
   busy?: boolean;
 }) {
   return (
@@ -158,6 +160,12 @@ export function ApprovalPrompt({
         <Button size="sm" variant="ghost" onClick={() => onAnswer(false)} disabled={busy}>
           <XCircle size={13} /> Deny
         </Button>
+        {onAllowAll && (
+          <Button size="sm" variant="ghost" onClick={onAllowAll} disabled={busy}
+            title="Approve this and all later commands in this chat without asking again">
+            <Check size={13} /> Allow all
+          </Button>
+        )}
       </div>
     </div>
   );

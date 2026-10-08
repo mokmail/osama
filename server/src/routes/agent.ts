@@ -58,6 +58,13 @@ interface LiveTurn {
   abort: AbortController;
   /** The parked prompt, if the turn is waiting on the user right now. */
   pending: { kind: "approval"; id: string; command: string; cwd: string } | { kind: "question"; id: string; question: string; options?: string[] } | null;
+  /**
+   * When the user picks "allow all", the turn stops parking on approvals: every
+   * later mutating call is auto-approved for the rest of this turn, exactly as
+   * if it had started in 'auto'. Flipped by the approve route; read live by
+   * every subsequent requestApproval so it takes effect mid-turn.
+   */
+  autoApprove?: boolean;
 }
 
 /** Live runs by runId. */
@@ -99,11 +106,23 @@ function endTurn(t: LiveTurn, status: LiveTurn["status"]): void {
  * Returns a detach function. The replay and the subscription happen in one
  * synchronous block so no event can slip between them; `attachTurn` is
  * synchronous for exactly that reason and must stay that way.
+ *
+ * STALE PROMPTS ARE FILTERED OUT OF THE REPLAY. The buffer keeps every event
+ * forever (so a late client can replay the whole turn), which means it also
+ * holds `approval_request` and `question` events that were ALREADY ANSWERED.
+ * Replaying those re-arms a dead prompt whose server-side approval has been
+ * deleted — the user clicks Allow and nothing happens (a silent 404). The
+ * current live prompt is instead sent explicitly by the caller from `t.pending`,
+ * so a reattaching client always sees exactly the prompt that is still open.
  */
 export function attachTurn(runId: string, res: http.ServerResponse): (() => void) | null {
   const t = liveTurns.get(runId);
   if (!t) return null;
-  for (const ev of t.events) sseSend(res, ev);
+  for (const ev of t.events) {
+    const kind = (ev as { type?: string } | null)?.type;
+    if (kind === "approval_request" || kind === "question") continue;
+    sseSend(res, ev);
+  }
   t.listeners.add(res);
   return () => t.listeners.delete(res);
 }
@@ -155,6 +174,10 @@ export const agentRoutes: RouteModule = (deps) => {
     emit: (ev: unknown) => void,
   ): Promise<boolean> {
     if (mode === "auto") return Promise.resolve(true);
+    // "Allow all for this session": once the user flips it, this turn no longer
+    // parks. Checked here (not at turn start) so the very next call is covered.
+    const turn = liveTurns.get(runId);
+    if (turn?.autoApprove) return Promise.resolve(true);
 
     const id = `ap_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
     const payload = { id, command: areq.command, cwd: areq.cwd, timeoutMs: APPROVAL_TIMEOUT_MS };
@@ -178,6 +201,13 @@ export const agentRoutes: RouteModule = (deps) => {
         pendingApprovals.delete(id);
         turnOfApproval.delete(id);
         clearTimeout(timer);
+        // Clear the turn's parked marker too. Without this, /api/agent/status
+        // keeps reporting a stale "pending approval" after the user answers —
+        // which made a reattaching client re-show a prompt that was already
+        // handled, and made any status-based reconciliation think the turn was
+        // still waiting.
+        const t = liveTurns.get(runId);
+        if (t?.pending?.kind === "approval" && (t.pending.id === id || !t.pending.id)) t.pending = null;
         resolve(allow);
       };
       const timer = setTimeout(() => finish(false), APPROVAL_TIMEOUT_MS);
@@ -205,6 +235,10 @@ export const agentRoutes: RouteModule = (deps) => {
       clearTimeout(owner.timer);
       pendingQuestions.delete(question.id);
       turnOfQuestion.delete(question.id);
+      // Clear the turn's parked marker so /api/agent/status stops reporting a
+      // question that has already been answered (see requestApproval).
+      const t = liveTurns.get(runId);
+      if (t?.pending?.kind === "question" && t.pending.id === question.id) t.pending = null;
       owner.resolve(answer);
     };
     const ssePayload = { id: question.id, question: question.question, options: question.options, timeoutMs };
@@ -237,22 +271,27 @@ export const agentRoutes: RouteModule = (deps) => {
    */
   function openaiTransport(ctx: { base: string; apiKey?: string }): core.AgentTransport {
     return async function* transport(payload) {
+      // Omit max_tokens unless it is a positive cap: llama.cpp reads -1 as
+      // "unlimited" but Ollama rejects any value <= 0 with an
+      // invalid_request_error. An absent field is unlimited on both.
+      const body: Record<string, unknown> = {
+        model: payload.model,
+        messages: payload.messages,
+        tools: payload.tools,
+        tool_choice: "auto",
+        stream: true,
+        temperature: payload.temperature,
+        top_p: payload.top_p,
+      };
+      if (typeof payload.max_tokens === "number" && payload.max_tokens > 0) body.max_tokens = payload.max_tokens;
+
       const upstream = await fetch(`${ctx.base}/v1/chat/completions`, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           ...(ctx.apiKey ? { authorization: `Bearer ${ctx.apiKey}` } : {}),
         },
-        body: JSON.stringify({
-          model: payload.model,
-          messages: payload.messages,
-          tools: payload.tools,
-          tool_choice: "auto",
-          stream: true,
-          temperature: payload.temperature,
-          top_p: payload.top_p,
-          max_tokens: payload.max_tokens,
-        }),
+        body: JSON.stringify(body),
         signal: payload.signal,
       });
 
@@ -376,11 +415,15 @@ export const agentRoutes: RouteModule = (deps) => {
   return [
     // --- tools the model may call -------------------------------------------
     route("GET", "/api/agent/tools", ({ res }) => {
+      // Built-in tools plus any live MCP tools, so the UI's Tools panel shows
+      // exactly what the model can call right now.
+      const mcp = core.mcpToolSpecs();
       json(res, 200, {
-        tools: core.AGENT_TOOLS,
+        tools: [...core.AGENT_TOOLS, ...mcp],
         readRoots: core.readRoots(),
         writableRoots: core.writableRoots(),
         workspace: core.getWorkspace(),
+        mcpToolCount: mcp.length,
       });
     }),
 
@@ -419,12 +462,23 @@ export const agentRoutes: RouteModule = (deps) => {
       json(res, 200, core.listWorkspaceFiles(Number.isFinite(max) ? max : 2000));
     }),
 
-    route("GET", "/api/workspace/file", ({ res, url }) => {
+    route("GET", "/api/workspace/file", async ({ res, url }) => {
       const rel = q(url, "path");
       if (!rel) return fail(res, 400, new Error("path is required"));
-      const r = core.readWorkspaceFile(rel);
+      const maxBytes = Number(q(url, "max") ?? 2 * 1024 * 1024);
+      const r = await core.readWorkspaceFile(rel, Number.isFinite(maxBytes) ? maxBytes : 2 * 1024 * 1024);
       if (!r.ok) return fail(res, 400, new Error(r.error));
       json(res, 200, r);
+    }),
+
+    // --- workspace snapshot: grounding info for the chat (non-agentic too) --
+    route("GET", "/api/workspace/snapshot", ({ res, url }) => {
+      const maxChars = Number(q(url, "max") ?? 600);
+      json(res, 200, {
+        path: core.getWorkspace(),
+        chosen: core.workspaceChosen(),
+        snapshot: core.workspaceSnapshot(Number.isFinite(maxChars) && maxChars > 0 ? maxChars : 600),
+      });
     }),
 
     // --- context, memory, skills introspection ------------------------------
@@ -439,7 +493,9 @@ export const agentRoutes: RouteModule = (deps) => {
           return [];
         }
       })();
-      const b = await core.measureContext(meter, messages, q(url, "tools") === "1" ? core.toolSchemas() : []);
+      // Count live MCP tools in the measurement: their schemas cost real tokens.
+      const schemas = q(url, "tools") === "1" ? core.toolSchemas(core.mcpToolSpecs()) : [];
+      const b = await core.measureContext(meter, messages, schemas);
       json(res, 200, { ...b, baseUrl: base, toolSupport: await toolSupportOf(base) });
     }),
 
@@ -452,9 +508,10 @@ export const agentRoutes: RouteModule = (deps) => {
       const body = await readBody(req);
       const base = String(body.baseUrl ?? "http://127.0.0.1:8080").replace(/\/$/, "");
       const messages = Array.isArray(body.messages) ? (body.messages as core.ChatMessage[]) : [];
-      const meter = core.createMeter(base);
-      const b = await core.measureContext(meter, messages, body.tools === false ? [] : core.toolSchemas());
-      json(res, 200, { ...b, baseUrl: base, toolSupport: await toolSupportOf(base) });
+      // `model` names the Ollama model so its real context window is used.
+      const meter = core.createMeter(base, { model: typeof body.model === "string" ? body.model : undefined });
+      const b = await core.measureContext(meter, messages, body.tools === false ? [] : core.toolSchemas(core.mcpToolSpecs()));
+      json(res, 200, { ...b, baseUrl: base, toolSupport: await toolSupportOf(base, typeof body.model === "string" ? body.model : undefined) });
     }),
 
     route("GET", "/api/agent/skills", ({ res }) => {
@@ -637,10 +694,19 @@ export const agentRoutes: RouteModule = (deps) => {
       const body = await readBody(req);
       const pending = pendingApprovals.get(id);
       if (!pending) return fail(res, 404, new Error("no pending approval with that id"));
+      const allowAll = body.allowAll === true;
+      // "Allow all for this session": flip the running turn to auto-approve so
+      // every later mutating call in it runs without parking. Set BEFORE the
+      // resolve, so a call that races the answer already sees the flag.
+      if (allowAll) {
+        const runId = turnOfApproval.get(id);
+        const turn = runId ? liveTurns.get(runId) : undefined;
+        if (turn) turn.autoApprove = true;
+      }
       // `pending.resolve` performs its own cleanup — deleting here as well would
       // strand the promise (the earlier bug: the map lookup came back empty).
-      pending.resolve(body.allow === true);
-      json(res, 200, { ok: true, allowed: body.allow === true });
+      pending.resolve(body.allow === true || allowAll);
+      json(res, 200, { ok: true, allowed: body.allow === true || allowAll, allowAll });
     }),
 
     route("POST", "/api/agent/steer/:id", async ({ req, res, url }) => {
@@ -736,6 +802,13 @@ export const agentRoutes: RouteModule = (deps) => {
           const personality = typeof body.personality === "string" ? body.personality : undefined;
           let announced = false;
 
+          // MCP: make sure enabled servers are connected before the first model
+          // call, so their tools are part of this run. A failure is per-server
+          // and non-fatal — the chat still works with built-in tools.
+          if (core.listMcpServers().some((s) => s.enabled)) {
+            await core.connectAll().catch(() => {});
+          }
+
           for await (const ev of core.runAgent({
             transport: openaiTransport({ base, apiKey }),
             model,
@@ -749,12 +822,14 @@ export const agentRoutes: RouteModule = (deps) => {
             temperature: typeof body.temperature === "number" ? body.temperature : undefined,
             top_p: typeof body.top_p === "number" ? Number(body.top_p) : undefined,
             max_tokens: typeof body.max_tokens === "number" ? Number(body.max_tokens) : undefined,
-            meter: core.createMeter(base),
+            meter: core.createMeter(base, { model }),
             injectMemory: body.memory !== false,
             injectSkills: body.skills !== false,
             activeSkills: Array.isArray(body.activeSkills) ? body.activeSkills.map(String).slice(0, 12) : undefined,
             todos: agentTodos,
             sessionId: turn.sessionId,
+            extraTools: core.mcpToolSpecs(),
+            callMcp: core.callMcpTool,
             askUser: (question, timeoutMs) => {
               turn.pending = { kind: "question", id: question.id, question: question.question, options: question.options };
               turn.status = "awaiting_answer";
@@ -828,6 +903,15 @@ export const agentRoutes: RouteModule = (deps) => {
       if (t.pending) sseSend(res, t.pending.kind === "approval" ? { type: "approval_request", ...t.pending, timeoutMs: APPROVAL_TIMEOUT_MS } : { type: "question", ...t.pending });
       const detach = attachTurn(runId, res);
       res.on("close", () => detach?.());
+      // A turn that has already ended (still in its grace window) will never end
+      // this response itself — `endTurn` already ran and cleared the listeners.
+      // Replay the buffer, add a synthetic end marker, then close, so a late
+      // attach gets the whole turn and the client is not left on a dead stream.
+      if (t.status !== "running" && t.status !== "awaiting_approval" && t.status !== "awaiting_answer") {
+        sseSend(res, { type: "done" });
+        detach?.();
+        try { res.end(); } catch { /* already gone */ }
+      }
       void t;
     }),
 
@@ -915,17 +999,36 @@ function agentBase(url: URL | null, fallback = "http://127.0.0.1:8080"): string 
   return (fromQuery ?? fallback).replace(/\/$/, "");
 }
 
-/** Cached per server URL: the template cannot change without a restart. */
+/**
+ * Whether the endpoint's model can call tools.
+ *
+ * llama.cpp answers `/props` with the chat template, which is the ground truth.
+ * Ollama has no such route, but `/api/show` reports a `tools` capability, so
+ * that is used instead. Cached per (base, model): an Ollama daemon can serve
+ * several models with different capabilities.
+ */
 const toolSupportCache = new Map<string, core.ToolSupport>();
-async function toolSupportOf(base: string): Promise<core.ToolSupport> {
-  const hit = toolSupportCache.get(base);
+async function toolSupportOf(base: string, model?: string): Promise<core.ToolSupport> {
+  const key = `${base}|${model ?? ""}`;
+  const hit = toolSupportCache.get(key);
   if (hit) return hit;
+  if (core.looksLikeOllama(base)) {
+    if (model) {
+      const info = await core.ollamaShow(model, base);
+      if (info?.capabilities) {
+        const support: core.ToolSupport = info.capabilities.includes("tools") ? "full" : "none";
+        toolSupportCache.set(key, support);
+        return support;
+      }
+    }
+    return "unknown";
+  }
   try {
     const r = await fetch(`${base}/props`, { signal: AbortSignal.timeout(4000) });
     if (r.ok) {
       const p: any = await r.json();
       const support = core.detectToolSupport(p?.chat_template);
-      toolSupportCache.set(base, support);
+      toolSupportCache.set(key, support);
       return support;
     }
   } catch {

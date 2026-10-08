@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   Bot, Check as CheckIcon, ChevronDown, Copy, FileText, Folder, FolderOpen, GitBranch, Image as ImageIcon,
-  Paperclip, Pencil, Play, RefreshCw, RotateCcw, Send, Sparkles, StopCircle, Trash2, User, X, AlertTriangle, Plus,
+  Paperclip, Pencil, Play, Plug, RefreshCw, RotateCcw, Send, Sparkles, StopCircle, Trash2, User, X, AlertTriangle, Plus,
 } from "lucide-react";
 import { api, agentApi, type AgentMessagePayload } from "../lib/api";
 import {
@@ -10,7 +10,7 @@ import {
   clearCompaction, clearTodos, currentSessionId, findLiveRun, getChatState,
   newRunId, noteCompaction, resetSession, setMessages, startRun, stopRun, useChat,
 } from "../lib/runStore";
-import type { AgentQuestion, AgentStep, AgentTool, ContextBreakdown, LocalModel, ManagedProcess, MemoryStats, PromptSection, SkillMeta, SystemResponse, TodoItem, WorkspaceFile } from "../lib/types";
+import type { AgentQuestion, AgentStep, AgentTool, ContextBreakdown, LocalModel, ManagedProcess, McpServerStatus, MemoryStats, OllamaStatus, PromptSection, SkillMeta, SystemResponse, TodoItem, WorkspaceFile } from "../lib/types";
 import { Badge, Button, Empty, Spinner, useToast } from "../components/ui";
 import { AgentTrace, ApprovalPrompt, QuestionPrompt } from "../components/AgentTrace";
 import { ChatInsights, type FocusSignal } from "../components/ChatInsights";
@@ -50,6 +50,47 @@ const DEFAULT_SYSTEM = "You are a helpful, precise assistant running fully offli
 /** Active skills persist across reloads, like the model choice. */
 const ACTIVE_SKILLS_KEY = "osama.chat.skills";
 const PERSONALITY_KEY = "osama.chat.personality";
+
+/**
+ * Chat provider: Osama's own llama.cpp server, or a local Ollama daemon the
+ * user already runs. Persisted so the choice survives a reload; scoped to the
+ * chat page only, so every other view keeps using Osama's llama.cpp process.
+ */
+type ChatProvider = "llamacpp" | "ollama";
+const PROVIDER_KEY = "osama.chat.provider";
+const OLLAMA_URL_KEY = "osama.chat.ollamaUrl";
+const OLLAMA_MODEL_KEY = "osama.chat.ollamaModel";
+
+function loadProvider(): ChatProvider {
+  try {
+    return localStorage.getItem(PROVIDER_KEY) === "ollama" ? "ollama" : "llamacpp";
+  } catch {
+    return "llamacpp";
+  }
+}
+function saveProvider(p: ChatProvider): void {
+  try { localStorage.setItem(PROVIDER_KEY, p); } catch { /* storage full */ }
+}
+function loadOllamaUrl(): string {
+  try {
+    return localStorage.getItem(OLLAMA_URL_KEY) || "http://127.0.0.1:11434";
+  } catch {
+    return "http://127.0.0.1:11434";
+  }
+}
+function saveOllamaUrl(url: string): void {
+  try { localStorage.setItem(OLLAMA_URL_KEY, url); } catch { /* storage full */ }
+}
+function loadOllamaModel(): string {
+  try {
+    return localStorage.getItem(OLLAMA_MODEL_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+function saveOllamaModel(name: string): void {
+  try { localStorage.setItem(OLLAMA_MODEL_KEY, name); } catch { /* storage full */ }
+}
 
 /**
  * The chosen personality overlay, persisted like the active skills are: it is a
@@ -207,6 +248,25 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const [apiKey, setApiKey] = useState("");
 
   /**
+   * Provider choice, chat-page only. "llamacpp" is the default and unchanged
+   * behaviour; "ollama" points the chat at the user's already-running daemon.
+   * The rest of the app never reads this — it always speaks to Osama's
+   * llama.cpp processes.
+   */
+  const [provider, setProvider] = useState<ChatProvider>(() => loadProvider());
+  const [ollamaUrl, setOllamaUrl] = useState<string>(() => loadOllamaUrl());
+  const [ollamaModel, setOllamaModel] = useState<string>(() => loadOllamaModel());
+  const [ollama, setOllama] = useState<OllamaStatus | null>(null);
+  const [ollamaChecking, setOllamaChecking] = useState(false);
+
+  /**
+   * Connected MCP servers, so the composer can show that external tools are in
+   * play. Read-only here — the MCP view and sidebar panel own the management.
+   */
+  const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
+  const [mcpOpen, setMcpOpen] = useState(false);
+
+  /**
    * THE RUN LIVES IN THE STORE, NOT IN THIS COMPONENT.
    *
    * Everything a turn produces — the transcript, the streaming text, the step
@@ -359,19 +419,104 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     agentApi.tools().then((r) => setAgentTools(r.tools)).catch(() => {});
   }, [agentic, agentTools.length]);
 
-  // The agent needs to know where it is working before it can change anything.
+  // The chat is grounded in the selected workspace, agentic or not: the
+  // snapshot goes into the system prompt so the model knows which directory
+  // the conversation is about, and @-mentions resolve against it.
+  const [wsSnapshot, setWsSnapshot] = useState<{ path: string; snapshot: string } | null>(null);
   useEffect(() => {
     agentApi
       .workspaces()
       .then((w) => setWorkspace({ path: w.current, chosen: w.chosen }))
       .catch(() => {});
+    agentApi
+      .workspaceSnapshot(600)
+      .then((s) => setWsSnapshot({ path: s.path, snapshot: s.snapshot }))
+      .catch(() => {});
+    // Refresh the snapshot when the workspace changes (the sidebar modal does
+    // the switching — the event bus carries it, or we poll on a timer).
+    const t = setInterval(() => {
+      agentApi.workspaceSnapshot(600)
+        .then((s) => setWsSnapshot((prev) => (prev?.path === s.path ? { path: s.path, snapshot: s.snapshot } : prev)))
+        .catch(() => {});
+    }, 10000);
+    return () => clearInterval(t);
   }, [agentic]);
+
+  // Also refresh the workspace + snapshot right after the sidebar changes it.
+  useEffect(() => {
+    const onWs = () => {
+      agentApi.workspaces().then((w) => setWorkspace({ path: w.current, chosen: w.chosen })).catch(() => {});
+      agentApi.workspaceSnapshot(600).then((s) => setWsSnapshot({ path: s.path, snapshot: s.snapshot })).catch(() => {});
+    };
+    window.addEventListener("osama:workspace-changed", onWs);
+    return () => window.removeEventListener("osama:workspace-changed", onWs);
+  }, []);
+
+  // Ollama discovery: poll the daemon while the chat uses it, so a daemon that
+  // starts or stops is reflected without a reload. The poll only runs for the
+  // ollama provider, so the llama.cpp path is untouched.
+  const loadOllama = useCallback(async (showSpinner = false) => {
+    if (showSpinner) setOllamaChecking(true);
+    try {
+      const s = await api.ollamaStatus(ollamaUrl);
+      setOllama(s);
+      // If the chosen model vanished, fall back to the newest available one.
+      setOllamaModel((cur) => {
+        if (s.models.length && !s.models.some((m) => m.name === cur)) {
+          const next = s.models[0]!.name;
+          saveOllamaModel(next);
+          return next;
+        }
+        return cur;
+      });
+    } catch (e) {
+      // Distinguish "the Osama engine has no /api/ollama route" (a stale engine
+      // built before this feature) from "the Ollama daemon itself is down".
+      // Conflating them sent users to `ollama serve` when the real fix was to
+      // restart Osama, so the message names the actual cause.
+      const msg = (e as Error).message;
+      const staleEngine = /no route for .*\/api\/ollama/i.test(msg);
+      setOllama({
+        reachable: false,
+        url: ollamaUrl,
+        models: [],
+        hasModels: false,
+        error: staleEngine
+          ? "The running Osama engine predates the Ollama feature. Restart Osama (npm start) to load the new routes."
+          : msg,
+      });
+    } finally {
+      setOllamaChecking(false);
+    }
+  }, [ollamaUrl]);
+
+  useEffect(() => {
+    if (provider !== "ollama") return;
+    void loadOllama();
+    const t = setInterval(() => void loadOllama(), 8000);
+    return () => clearInterval(t);
+  }, [provider, loadOllama]);
+
+  // MCP: keep the composer's indicator current. Cheap enough to poll while the
+  // chat is mounted, and it refreshes immediately when the MCP panel changes.
+  useEffect(() => {
+    const pull = () => agentApi.mcpServers().then((r) => setMcpServers(r.servers)).catch(() => {});
+    pull();
+    const t = setInterval(pull, 8000);
+    window.addEventListener("osama:mcp-changed", pull);
+    return () => { clearInterval(t); window.removeEventListener("osama:mcp-changed", pull); };
+  }, []);
 
   // A server process appears instantly but the model may still be loading, so
   // readiness comes from its own /health and the poll keeps running until then.
+  // For the Ollama provider there is no managed process: readiness is simply
+  // "the daemon answered and a model is selected".
   const healthReady = useServerReady(procs.some((p) => p.tool.includes("llama-server")) ? baseUrl : undefined);
   const serverProcess = procs.find((p) => p.tool.includes("llama-server") && p.status === "running");
-  const loading = !!serverProcess && !healthReady;
+  const ollamaReady = !!ollama?.reachable && !!ollamaModel;
+  const loading = provider === "llamacpp" && !!serverProcess && !healthReady;
+  // The provider's effective endpoint — what every request must be sent to.
+  const effectiveBaseUrl = provider === "ollama" ? ollamaUrl : baseUrl;
   const failure = useLoadFailure(procs);
   const [dismissedFailure, setDismissedFailure] = useState<number | null>(null);
   /**
@@ -393,17 +538,37 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages]);
 
-  const runningServer = healthReady ? serverProcess : undefined;
-  const startingServer = loading ? serverProcess : undefined;
-  const busy = streaming || loading;
+  /**
+   * "Ready to chat" and "a server is up", unified across providers so the rest
+   * of the view never branches on the provider:
+   *  - llamacpp: ready when the managed server answers /health
+   *  - ollama:   ready when the daemon is reachable and a model is chosen
+   */
+  const runningServer = provider === "ollama" ? (ollamaReady ? true : undefined) : (healthReady ? serverProcess : undefined);
+  const startingServer = provider === "ollama" ? (ollamaChecking && !ollama ? true : undefined) : (loading ? serverProcess : undefined);
+  const busy = streaming || (provider === "llamacpp" && loading);
 
-  // Which model the running server actually has in memory, and whether it can
-  // take images — read from the server itself, not from what we asked for.
+  // Which model is in play, and whether it can take images — read from the
+  // provider itself, not from what we asked for.
   const servedFile = serverProcess ? serverProcess.argv[serverProcess.argv.findIndex((a) => a === "-m" || a === "--model") + 1] : undefined;
   const serving = useMemo(() => (servedFile ? models.find((m) => m.file === servedFile) ?? null : null), [servedFile, models]);
   const servable = useMemo(() => models.filter((m) => !m.draftOnly && !m.missing), [models]);
 
+  const ollamaServing = useMemo(
+    () => ollama?.models.find((m) => m.name === ollamaModel) ?? null,
+    [ollama, ollamaModel],
+  );
+
+  // Vision: llama.cpp reports modalities via /props; Ollama via /api/show.
   useEffect(() => {
+    if (provider === "ollama") {
+      if (!ollamaModel) { setVision(null); return; }
+      let cancelled = false;
+      api.ollamaShow(ollamaModel, ollamaUrl)
+        .then((r) => { if (!cancelled) setVision(r.capabilities ? r.capabilities.includes("vision") : null); })
+        .catch(() => { if (!cancelled) setVision(null); });
+      return () => { cancelled = true; };
+    }
     if (!healthReady || !serverProcess) {
       setVision(null);
       return;
@@ -417,7 +582,27 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [healthReady, serverProcess?.id, baseUrl]);
+  }, [provider, healthReady, serverProcess?.id, baseUrl, ollamaModel, ollamaUrl]);
+
+  // Persist the provider choice and its settings so a reload lands where the
+  // user left. Scoped keys; nothing outside the chat reads them.
+  useEffect(() => { saveProvider(provider); }, [provider]);
+  useEffect(() => { saveOllamaUrl(ollamaUrl); }, [ollamaUrl]);
+  useEffect(() => { if (ollamaModel) saveOllamaModel(ollamaModel); }, [ollamaModel]);
+
+  /** Switch provider. A switch never kills a running turn; it only changes
+   *  which endpoint the *next* turn is sent to. */
+  function switchProvider(next: ChatProvider) {
+    if (next === provider) return;
+    setProvider(next);
+    if (next === "ollama") {
+      void loadOllama(true);
+      toast.push("info", "Ollama provider — using your local daemon.");
+    } else {
+      toast.push("info", "llama.cpp provider — using Osama's own server.");
+    }
+    focusInput();
+  }
 
   /** Archive the current conversation into history and start a blank one. */
   function newChat() {
@@ -471,6 +656,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   }
 
   async function switchModel(file: string) {
+    if (provider === "ollama") return; // Ollama models are chosen by name, not file
     if (!file || file === servedFile) return;
     setSwitching(true);
     // Acknowledge the pick at once: the animation is short and the load can be
@@ -613,10 +799,70 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         text: r.text,
       };
       setAttachments((a) => (a.some((x) => x.name === r.name) ? a : [...a, att]));
-      toast.push("ok", `Attached ${r.name} from the workspace.`);
+      // Surface truncation / extraction notes so the user knows what the
+      // model actually received (a 4 MB PDF becomes a few hundred KB of text).
+      if (r.mime === "application/pdf") {
+        toast.push("ok", `Attached ${r.name} — PDF text extracted from the workspace.`);
+      } else if (r.truncated && r.note) {
+        toast.push("warn", `Attached ${r.name} — ${r.note}.`);
+      } else {
+        toast.push("ok", `Attached ${r.name} from the workspace.`);
+      }
     } catch (e) {
       toast.push("err", (e as Error).message);
     }
+    requestAnimationFrame(() => {
+      if (el) { el.selectionStart = el.selectionEnd = next.length; el.focus(); }
+    });
+  }
+
+  // ---- #-mention: activate a skill inline --------------------------------
+  // Typing `#` at a word boundary opens a picker of installed skills.
+  // Choosing one toggles it as an active skill for this conversation (the
+  // same list the sparkles button manages), so the model follows it without
+  // a load_skill hop. The #token is replaced with the skill name as text so
+  // the user sees what was applied.
+  const [skillMention, setSkillMention] = useState<{ query: string; start: number } | null>(null);
+  const [skillMentionIdx, setSkillMentionIdx] = useState(0);
+
+  /** The `#word` the caret currently sits inside, if any. */
+  function detectSkillMention(el: HTMLTextAreaElement): { query: string; start: number } | null {
+    const upto = el.value.slice(0, el.selectionStart);
+    const hash = upto.lastIndexOf("#");
+    if (hash < 0) return null;
+    // `#` must start a word (start of text or preceded by whitespace)
+    if (hash > 0 && !/\s/.test(upto[hash - 1]!)) return null;
+    const query = upto.slice(hash + 1);
+    if (/\s/.test(query)) return null; // a space ends the token
+    // Don't trigger inside a URL fragment or a markdown heading at line start
+    // followed by more text on the same logical word — keep it simple: any
+    // `#word` at a word boundary is a skill mention.
+    return { query, start: hash };
+  }
+
+  const skillMentionMatches = skillMention
+    ? skills
+        .filter((s) =>
+          `${s.id} ${s.name} ${s.description} ${(s.tags ?? []).join(" ")}`
+            .toLowerCase().includes(skillMention.query.toLowerCase()),
+        )
+        .slice(0, 8)
+    : [];
+
+  async function pickSkillMention(s: SkillMeta) {
+    if (!skillMention) return;
+    const el = inputRef.current;
+    const caret = el?.selectionStart ?? input.length;
+    const before = input.slice(0, skillMention.start);
+    const after = input.slice(caret);
+    // Replace the #token with a readable reference and activate the skill.
+    const label = s.name || s.id;
+    const next = `${before}[skill: ${label}]${after}`.replace(/\s{2,}/g, " ");
+    setInput(next);
+    setSkillMention(null);
+    toggleSkill(s.id);
+    toast.push("ok", `Activated skill “${label}” for this conversation.`);
+    void loadSkills(); // make sure catalog is fresh for chips
     requestAnimationFrame(() => {
       if (el) { el.selectionStart = el.selectionEnd = next.length; el.focus(); }
     });
@@ -676,7 +922,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
 
     startRun({
       runId,
-      baseUrl,
+      baseUrl: effectiveBaseUrl,
       apiKey: apiKey || undefined,
       agentic,
       system: systemPrompt.trim() || undefined,
@@ -688,6 +934,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       ...(maxTokens === "" ? {} : { max_tokens: maxTokens as number }),
       history: history.map((m) => ({ role: m.role, content: m.content, attachments: m.attachments, steps: m.steps, stepCount: m.stepCount })),
       seed,
+      workspace: wsSnapshot,
+      // Ollama needs the real model name; llama.cpp ignores it.
+      model: provider === "ollama" ? ollamaModel : "local",
     });
   }
 
@@ -792,23 +1041,38 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   async function onAnswerApproval(allow: boolean) {
     const a = approval;
     if (!a) return;
-    await answerApproval(a.id, allow);
-    try {
-    } catch (e) {
-      toast.push("err", `Could not answer the approval: ${(e as Error).message}`);
+    const r = await answerApproval(a.id, allow);
+    // The prompt had already expired server-side — say so instead of leaving the
+    // click looking like it did nothing.
+    if (!r.ok) toast.push("warn", r.reason);
+  }
+
+  /**
+   * "Allow all for this session": approve this command AND stop asking for the
+   * rest of the conversation. Two effects, both needed:
+   *  - the server flips the running turn to auto-approve, so the rest of THIS
+   *    turn's commands run without parking;
+   *  - the composer's approval mode switches to 'auto' and persists, so every
+   *    FUTURE turn in this session also starts without asking.
+   */
+  async function onAllowAllApproval() {
+    const a = approval;
+    if (!a) return;
+    const r = await answerApproval(a.id, true, true);
+    if (!r.ok) {
+      toast.push("warn", r.reason);
+      return;
     }
+    setApprovalMode("auto");
+    toast.push("warn", "Auto-approve on for this session — commands will run without asking.");
   }
 
   /** Answer a parked question; the loop resumes from it. */
   async function onAnswerQuestion(text: string) {
     const q = question;
     if (!q) return;
-    // Show the exchange in the transcript, as the assistant's trace.
-    try {
-      await answerQuestion(q.id, text);
-    } catch (e) {
-      toast.push("err", `Could not deliver the answer: ${(e as Error).message}`);
-    }
+    const r = await answerQuestion(q.id, text);
+    if (!r.ok) toast.push("warn", r.reason);
   }
 
   function autoGrow(el: HTMLTextAreaElement) {
@@ -839,19 +1103,28 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const ctxShape = `${messages.length}:${messages.reduce((n, m) => n + (m.content?.length ?? 0), 0)}`;
   useEffect(() => {
     let alive = true;
-    const pull = () => agentApi.context(baseUrl, contextMessages, agentic)
+    const ctxModel = provider === "ollama" ? ollamaModel : undefined;
+    const pull = () => agentApi.context(effectiveBaseUrl, contextMessages, agentic, ctxModel)
       .then((c) => { if (alive) setInlineCtx(c as ContextBreakdown); })
       .catch(() => {});
     pull();
     const t = setInterval(pull, 5000);
     return () => { alive = false; clearInterval(t); };
-  }, [baseUrl, agentic, ctxShape]);
+  }, [effectiveBaseUrl, agentic, ctxShape, provider, ollamaModel]);
 
   // Gemini-style: before the first message the prompt owns the middle of the
   // page; once a conversation exists it docks to the bottom.
   const landing = messages.length === 0 && !startingServer;
 
-  const modelPicker = (
+  const modelPicker = provider === "ollama" ? (
+    <OllamaPicker
+      status={ollama}
+      selected={ollamaModel}
+      checking={ollamaChecking}
+      onSelect={(name) => { setOllamaModel(name); focusInput(); }}
+      onRefresh={() => void loadOllama(true)}
+    />
+  ) : (
     <ModelPicker
       models={servable}
       servedFile={servedFile}
@@ -860,6 +1133,31 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       busy={switching}
       onChange={switchModel}
     />
+  );
+
+  // Provider switch — chat-page only. Kept as a compact two-state control so
+  // the rest of the header stays identical when llama.cpp is in use.
+  const providerSwitch = (
+    <div className="provswitch" role="group" aria-label="Chat provider">
+      <button
+        type="button"
+        className={`provswitch-btn ${provider === "llamacpp" ? "on" : ""}`}
+        onClick={() => switchProvider("llamacpp")}
+        title="Use Osama's own llama.cpp server"
+        aria-pressed={provider === "llamacpp"}
+      >
+        llama.cpp
+      </button>
+      <button
+        type="button"
+        className={`provswitch-btn ${provider === "ollama" ? "on" : ""}`}
+        onClick={() => switchProvider("ollama")}
+        title="Use the Ollama daemon installed on this machine"
+        aria-pressed={provider === "ollama"}
+      >
+        Ollama
+      </button>
+    </div>
   );
 
   const agentToggle = (
@@ -892,6 +1190,64 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       {!workspace.chosen && <span className="wspick-unset">default</span>}
     </button>
   );
+
+  // Workspace grounding chip: always visible so the user can see which
+  // directory the chat is grounded in (agentic or not).
+  const workspaceGrounding = wsSnapshot ? (
+    <span title={`${wsSnapshot.path}\n\n${wsSnapshot.snapshot.slice(0, 400)}`} style={{ display: "inline-flex" }}>
+      <Badge kind={workspace.chosen ? "info" : "warn"}>
+        <FolderOpen size={11} />
+        {workspace.chosen ? "grounded" : "default"}: {wsSnapshot.path.split("/").slice(-1)[0] || wsSnapshot.path}
+      </Badge>
+    </span>
+  ) : null;
+
+  const connectedMcp = mcpServers.filter((s) => s.connected);
+  const mcpToolCount = connectedMcp.reduce((n, s) => n + s.toolCount, 0);
+
+  /**
+   * The composer's MCP indicator. Shows only when at least one server is
+   * connected, so the composer stays uncluttered otherwise. Hovering lists the
+   * servers; clicking opens the MCP manager.
+   */
+  const mcpIndicator = connectedMcp.length > 0 ? (
+    <div className="mcp-indicator-wrap">
+      <button
+        type="button"
+        className="mcp-indicator"
+        onClick={(e) => { e.stopPropagation(); setMcpOpen((v) => !v); }}
+        title="Connected MCP servers — click for details"
+        aria-expanded={mcpOpen}
+      >
+        <span className="mcp-indicator-dot" />
+        <Plug size={13} />
+        <span className="mcp-indicator-label">
+          {connectedMcp.length} MCP server{connectedMcp.length === 1 ? "" : "s"}
+        </span>
+        <span className="mcp-indicator-tools">{mcpToolCount} tool{mcpToolCount === 1 ? "" : "s"}</span>
+        <ChevronDown size={12} className={`mcp-indicator-chev ${mcpOpen ? "open" : ""}`} />
+      </button>
+      {mcpOpen && (
+        <div className="mcp-indicator-pop" role="dialog" aria-label="Connected MCP servers">
+          <div className="mention-head">
+            <span>MCP · {connectedMcp.length} connected</span>
+            <button className="mention-x" onClick={() => setMcpOpen(false)} aria-label="Close"><X size={12} /></button>
+          </div>
+          {connectedMcp.map((s) => (
+            <div key={s.config.id} className="mcp-indicator-row">
+              <span className="mcp-indicator-dot" />
+              <span className="mcp-indicator-name">{s.config.name}</span>
+              {s.config.trusted && <span className="rptag">trusted</span>}
+              <span className="faint small">{s.toolCount} tool{s.toolCount === 1 ? "" : "s"}</span>
+            </div>
+          ))}
+          <div className="mcp-indicator-foot faint small">
+            Tools are available to the agent while agentic mode is on.
+          </div>
+        </div>
+      )}
+    </div>
+  ) : null;
 
   const composerEl = (
     <div
@@ -1000,7 +1356,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         {mention && (
           <div className="mention-pop" role="listbox" aria-label="Workspace files">
             <div className="mention-head">
-              <span>Workspace files</span>
+              <span>Workspace files · @</span>
               <span className="faint small">{mentionMatches.length ? "↑↓ · Enter to pick · Esc to close" : wsFiles.length ? "no match" : "loading…"}</span>
             </div>
             {mentionMatches.map((f, i) => (
@@ -1023,22 +1379,71 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             )}
           </div>
         )}
+        {skillMention && (
+          <div className="mention-pop skill-mention-pop" role="listbox" aria-label="Skills">
+            <div className="mention-head">
+              <span>Skills · #</span>
+              <span className="faint small">{skillMentionMatches.length ? "↑↓ · Enter to activate · Esc to close" : skills.length ? "no match" : "loading…"}</span>
+            </div>
+            {skillMentionMatches.map((s, i) => {
+              const on = activeSkills.includes(s.id);
+              return (
+                <button
+                  key={s.id}
+                  role="option"
+                  aria-selected={i === skillMentionIdx}
+                  className={`mention-row skill-mention-row ${i === skillMentionIdx ? "on" : ""} ${on ? "active" : ""}`}
+                  onMouseEnter={() => setSkillMentionIdx(i)}
+                  onMouseDown={(e) => { e.preventDefault(); void pickSkillMention(s); }}
+                >
+                  <Sparkles size={13} />
+                  <span className="mention-name">{s.name || s.id}</span>
+                  <span className="mention-rel">{s.description.slice(0, 80)}{s.description.length > 80 ? "…" : ""}</span>
+                  {on && <span className="faint small">active</span>}
+                </button>
+              );
+            })}
+            {!skillMentionMatches.length && skills.length > 0 && (
+              <div className="mention-empty">No skill matches “{skillMention.query}”.</div>
+            )}
+            {!skills.length && (
+              <div className="mention-empty">No skills installed yet — install one from the Skills panel.</div>
+            )}
+          </div>
+        )}
         <textarea
           ref={inputRef}
           value={input}
           onChange={(e) => {
             setInput(e.target.value);
             autoGrow(e.currentTarget);
+            // Detect @file mentions
             const d = detectMention(e.currentTarget);
-            if (d) { setMention(d); setMentionIdx(0); void loadWsFiles(); }
-            else if (mention) setMention(null);
+            if (d) {
+              setMention(d); setMentionIdx(0); void loadWsFiles();
+              if (skillMention) setSkillMention(null);
+            } else if (mention) setMention(null);
+            // Detect #skill mentions
+            const h = detectSkillMention(e.currentTarget);
+            if (h) {
+              setSkillMention(h); setSkillMentionIdx(0); void loadSkills();
+              if (mention) setMention(null);
+            } else if (skillMention) setSkillMention(null);
           }}
-          onBlur={() => { /* let mousedown on a row win before we close */ setTimeout(() => setMention(null), 120); }}
+          onBlur={() => { /* let mousedown on a row win before we close */ setTimeout(() => { setMention(null); setSkillMention(null); }, 120); }}
           onPaste={(e) => {
             const files = e.clipboardData?.files;
             if (files && files.length) { e.preventDefault(); attach(files); }
           }}
           onKeyDown={(e) => {
+            // Skill mention navigation
+            if (skillMention && skillMentionMatches.length) {
+              if (e.key === "ArrowDown") { e.preventDefault(); setSkillMentionIdx((i) => (i + 1) % skillMentionMatches.length); return; }
+              if (e.key === "ArrowUp") { e.preventDefault(); setSkillMentionIdx((i) => (i - 1 + skillMentionMatches.length) % skillMentionMatches.length); return; }
+              if (e.key === "Enter" || e.key === "Tab") { e.preventDefault(); void pickSkillMention(skillMentionMatches[skillMentionIdx]!); return; }
+              if (e.key === "Escape") { e.preventDefault(); setSkillMention(null); return; }
+            }
+            // File mention navigation
             if (mention && mentionMatches.length) {
               if (e.key === "ArrowDown") { e.preventDefault(); setMentionIdx((i) => (i + 1) % mentionMatches.length); return; }
               if (e.key === "ArrowUp") { e.preventDefault(); setMentionIdx((i) => (i - 1 + mentionMatches.length) % mentionMatches.length); return; }
@@ -1054,7 +1459,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             startingServer
               ? "Waiting for the model to finish loading…"
               : runningServer
-                ? "Message your model…  (Enter to send · Shift+Enter for newline · drop a file to attach)"
+                ? "Message your model…  (@ file · # skill · Enter to send · Shift+Enter newline)"
                 : "Pick a model above to start…"
           }
           rows={1}
@@ -1071,6 +1476,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       </div>
       {busy && !streaming && <div className="faint small" style={{ marginTop: 6 }}>Model is loading — you can keep typing.</div>}
       <div className="composer-ctx" aria-live="off">
+        {mcpIndicator}
         {inlineCtx ? (
           <>
             <span className="composer-ctx-bar" aria-hidden="true">
@@ -1102,11 +1508,26 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const mainColumn = (
     <div className={`stack chat-view ${modelChanged ? "model-changed" : ""}`}>
       <div className="row wrap" style={{ gap: 10 }}>
+        {providerSwitch}
         {modelPicker}
         {agentToggle}
-        {agentic && workspacePicker}
-        {runningServer ? <Badge kind="ok"><span className="dot" /> server running</Badge> : startingServer ? <Badge kind="info"><span className="dot" /> loading model…</Badge> : <Badge kind="warn">no server — pick a model</Badge>}
+        {workspacePicker}
+        {workspaceGrounding}
+        {provider === "ollama" ? (
+          runningServer
+            ? <Badge kind="ok"><span className="dot" /> ollama{ollama?.version ? ` ${ollama.version}` : ""}</Badge>
+            : startingServer
+              ? <Badge kind="info"><span className="dot" /> checking ollama…</Badge>
+              : <Badge kind="warn">ollama not reachable</Badge>
+        ) : (
+          runningServer ? <Badge kind="ok"><span className="dot" /> server running</Badge> : startingServer ? <Badge kind="info"><span className="dot" /> loading model…</Badge> : <Badge kind="warn">no server — pick a model</Badge>
+        )}
         {vision === true && <Badge kind="accent">vision</Badge>}
+        {connectedMcp.length > 0 && (
+          <span title={connectedMcp.map((s) => `${s.config.name} · ${s.toolCount} tool(s)`).join("\n")} style={{ display: "inline-flex" }}>
+            <Badge kind="accent"><Plug size={11} /> {mcpToolCount} MCP tool{mcpToolCount === 1 ? "" : "s"}</Badge>
+          </span>
+        )}
         {agentic && approvalMode === "auto" && <Badge kind="warn">auto-approve</Badge>}
         {agentic && toolSupport === "none" && (
           <Badge kind="warn"><AlertTriangle size={11} /> model can't call tools</Badge>
@@ -1126,25 +1547,66 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         </Button>
       </div>
 
-      {showFailure && failure && (
+      {provider === "llamacpp" && showFailure && failure && (
         <FailedLoad proc={failure.proc} onDismiss={() => setDismissedFailure(failure.since)} />
       )}
 
-      {startingServer && (
+      {provider === "llamacpp" && startingServer && serverProcess && (
         <ModelLoading
-          processId={startingServer.id}
-          url={startingServer.url}
-          modelName={serving?.name ?? startingServer.label.split(" · ").pop()}
-          startedAt={startingServer.startedAt}
+          processId={serverProcess.id}
+          url={serverProcess.url}
+          modelName={serving?.name ?? serverProcess.label.split(" · ").pop()}
+          startedAt={serverProcess.startedAt}
           onReady={load}
           onError={(m: string) => toast.push("err", `llama-server failed to load the model: ${m.slice(0, 160)}`)}
         />
       )}
 
+      {provider === "ollama" && ollama && !ollama.reachable && (
+        <div className="card card-pad" style={{ borderColor: "color-mix(in srgb, var(--warn) 45%, transparent)" }}>
+          <div className="row" style={{ gap: 12, alignItems: "flex-start" }}>
+            <span style={{ marginTop: 1, color: "var(--warn)" }}><AlertTriangle size={17} /></span>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontWeight: 400, fontSize: 13.5 }}>Ollama is not reachable</div>
+              <div className="faint small" style={{ marginTop: 3 }}>
+                {ollama.error
+                  ? <>{ollama.error}</>
+                  : <>Could not reach <span className="mono">{ollama.url}</span>. Start Ollama on this machine
+                    (<span className="mono">ollama serve</span>), then retry — or switch back to the llama.cpp provider.</>}
+              </div>
+              <div className="row" style={{ gap: 8, marginTop: 10 }}>
+                <Button size="sm" onClick={() => void loadOllama(true)}>Retry</Button>
+                <Button size="sm" variant="ghost" onClick={() => switchProvider("llamacpp")}>Use llama.cpp</Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {provider === "ollama" && ollama?.reachable && !ollamaModel && (
+        <div className="card card-pad" style={{ borderColor: "color-mix(in srgb, var(--warn) 45%, transparent)" }}>
+          <div className="faint small">
+            Ollama is running{ollama.models.length ? "" : " but has no models"}.
+            {ollama.models.length ? " Pick a model above to start chatting." : " Pull one with `ollama pull <model>` first."}
+          </div>
+        </div>
+      )}
+
       <div
         ref={scrollRef}
         className={`chat-scroll ${landing ? "chat-landing" : ""}`}
-        onClick={() => focusInput()}
+        onClick={(e) => {
+          // Clicking the transcript focuses the composer — but NOT when the
+          // click landed on an interactive element inside it. Otherwise an
+          // inline prompt's input (the agent's question, a message editor)
+          // loses focus to the composer the moment it is clicked. This was
+          // why answering an agent question kept jumping to the main input.
+          const el = e.target as HTMLElement;
+          if (el.closest("input, textarea, select, button, a, [contenteditable='true'], .approval, .cm-edit")) return;
+          const selection = window.getSelection();
+          if (selection && !selection.isCollapsed) return; // user is selecting text
+          focusInput();
+        }}
       >
         {interrupted && !streaming && (
           <div className="runcut" role="status">
@@ -1183,13 +1645,20 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
           <Empty
             icon={<Spinner />}
             title="Model is loading"
-            sub={`Chat unlocks the moment ${(startingServer.label.split(" · ").pop() ?? "the model")} is ready — watch the progress above.`}
+            sub={
+              provider === "ollama"
+                ? "Chat unlocks the moment your Ollama model is ready."
+                : `Chat unlocks the moment ${(serverProcess?.label.split(" · ").pop() ?? "the model")} is ready — watch the progress above.`
+            }
           />
         ) : (
           <div className="chat">
             {messages.map((m, i) => {
               const last = i === messages.length - 1;
-              const who = m.role === "user" ? "You" : serving ? fileBase(serving.file) : "Assistant";
+              const assistantName = provider === "ollama"
+                ? (ollamaModel || "Assistant")
+                : serving ? fileBase(serving.file) : "Assistant";
+              const who = m.role === "user" ? "You" : assistantName;
               return (
                 <div key={i} className={`cm ${m.role === "user" ? "cm-user" : "cm-ai"}`}>
                   {/* OWUI shape: a quiet header row (avatar · name · meta) over the body */}
@@ -1251,6 +1720,11 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
                         running={streaming && last}
                       />
                     )}
+                    {/* A thinking model's chain-of-thought, kept separate from
+                        the answer (Ollama streams it on its own channel). */}
+                    {m.role === "assistant" && m.reasoning && m.reasoning.trim() && (
+                      <ReasoningBlock text={m.reasoning} streaming={streaming && last && !m.content} />
+                    )}
                     {m.content ? (
                       m.role === "user" && editing?.index === i ? (
                         <div className="cm-edit">
@@ -1289,6 +1763,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
                         command={approval.command}
                         cwd={approval.cwd}
                         onAnswer={onAnswerApproval}
+                        onAllowAll={onAllowAllApproval}
                       />
                     )}
                     {m.role === "assistant" && question && last && (
@@ -1310,14 +1785,20 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         <div className="composer-wrap">
           <div className="landing-center">
             <img className="landing-logo" src="/logo.png" alt="" aria-hidden="true" />
-            <div className="landing-mark">{serving ? fileBase(serving.file) : "Local inference"}</div>
+            <div className="landing-mark">
+              {provider === "ollama"
+                ? (ollamaModel || "Ollama")
+                : serving ? fileBase(serving.file) : "Local inference"}
+            </div>
             <div className="landing-brand">
-              {runningServer ? "What are we exploring?" : startingServer ? "Loading the model…" : "Pick a model to begin"}
+              {runningServer ? "What are we exploring?" : startingServer ? "Loading the model…" : provider === "ollama" ? "Pick an Ollama model to begin" : "Pick a model to begin"}
             </div>
             <p className="landing-sub">
               {runningServer
-                ? "Runs entirely on this machine. Attach a file with the paperclip, or just start typing."
-                : "Choose a model in the bar above (or serve one from the Server view)."}
+                ? `Runs entirely on this machine${provider === "ollama" ? " through your Ollama daemon" : ""}. Type @ to reference a workspace file, # to load a skill, or drop a file to attach.`
+                : provider === "ollama"
+                  ? "Choose one of your installed Ollama models above, or switch back to llama.cpp."
+                  : "Choose a model in the bar above (or serve one from the Server view)."}
             </p>
             {runningServer && (
               <div className="suggest">
@@ -1352,8 +1833,8 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     setCompacting(true);
     try {
       const r = await agentApi.compact({
-        baseUrl,
-        model: "local",
+        baseUrl: effectiveBaseUrl,
+        model: provider === "ollama" ? ollamaModel : "local",
         messages: compactMessages,
       });
       if (r.compacted) {
@@ -1385,7 +1866,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       {insightSlot &&
         createPortal(
           <ChatInsights
-            baseUrl={baseUrl}
+            baseUrl={effectiveBaseUrl}
             agentic={agentic}
             todos={todos}
             refreshKey={agentStepCount}
@@ -1405,7 +1886,8 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             onOpenChat={openChat}
             onDeleteChat={deleteChat}
             focus={focus}
-            model={servedFile ?? serving?.file ?? ""}
+            model={provider === "ollama" ? ollamaModel : (servedFile ?? serving?.file ?? "")}
+            contextModel={provider === "ollama" ? ollamaModel : undefined}
             compactMessages={compactMessages}
             onCompactClick={compactNow}
             compacting={compacting}
@@ -1501,6 +1983,136 @@ function ModelPicker({
           <div className="mpick-foot">Choosing a model starts it — one server at a time.</div>
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * The Ollama model picker. Same popover shell as `ModelPicker`, but the list is
+ * the daemon's own models (by name) rather than Osama's GGUF library. Selecting
+ * one does not start anything — the model is loaded by Ollama on first use.
+ */
+function OllamaPicker({
+  status, selected, checking, onSelect, onRefresh,
+}: {
+  status: OllamaStatus | null;
+  selected: string;
+  checking: boolean;
+  onSelect: (name: string) => void;
+  onRefresh: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const models = status?.models ?? [];
+  const usable = models.filter((m) => !/embed|rerank/i.test(`${m.name} ${m.family ?? ""}`));
+  const label = checking && !status
+    ? "checking ollama…"
+    : selected
+      ? selected
+      : status?.reachable
+        ? (usable.length ? "Select an Ollama model" : "No models in Ollama")
+        : "Ollama not reachable";
+
+  const humanBytes = (n: number): string => {
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+    if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(0)} MB`;
+    return `${(n / 1024 / 1024 / 1024).toFixed(1)} GB`;
+  };
+
+  return (
+    <div className="mpick" ref={rootRef}>
+      <button
+        type="button"
+        className={`mpick-btn ${open ? "open" : ""}`}
+        onClick={() => setOpen((v) => !v)}
+        disabled={!status?.reachable || usable.length === 0}
+        title={selected ? `Ollama model: ${selected}` : "Choose an Ollama model"}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        {checking ? <Spinner /> : <Bot size={15} className="mpick-bot" />}
+        <span className="mpick-name">{label}</span>
+        <ChevronDown size={14} className="mpick-chev" />
+      </button>
+
+      {open && (
+        <div className="mpick-menu" role="listbox">
+          <div className="mpick-head row" style={{ justifyContent: "space-between" }}>
+            <span>ollama models</span>
+            <button className="mention-x" onClick={onRefresh} title="Re-check the daemon"><RefreshCw size={11} /></button>
+          </div>
+          {usable.map((m) => {
+            const active = m.name === selected;
+            return (
+              <button
+                key={m.name}
+                type="button"
+                role="option"
+                aria-selected={active}
+                className={`mpick-item ${active ? "active" : ""}`}
+                onClick={() => { setOpen(false); if (!active) onSelect(m.name); }}
+              >
+                <span className="mpick-tick">{active && <CheckIcon size={13} />}</span>
+                <span className="mpick-item-body">
+                  <span className="mpick-item-name" title={m.name}>{m.name}</span>
+                  <span className="mpick-item-meta">
+                    {[m.parameterSize, m.quantization, m.capabilities?.includes("tools") ? "tools" : null, m.capabilities?.includes("vision") ? "vision" : null]
+                      .filter(Boolean).join(" · ") || m.family || "—"}
+                  </span>
+                </span>
+                <span className="mpick-item-size">{m.size ? humanBytes(m.size) : ""}</span>
+              </button>
+            );
+          })}
+          {!usable.length && (
+            <div className="mention-empty">
+              {status?.reachable ? "No chat models installed. Pull one with `ollama pull <model>`." : "Start Ollama, then retry."}
+            </div>
+          )}
+          <div className="mpick-foot">
+            {status?.version ? `Ollama ${status.version} · ` : ""}{status?.url ?? ""}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A collapsible view of a model's reasoning, shown muted above the answer so it
+ * never competes with the reply. Auto-open while the model is still thinking
+ * with no answer yet, so the user sees progress rather than a stalled bubble.
+ */
+function ReasoningBlock({ text, streaming }: { text: string; streaming: boolean }) {
+  const [open, setOpen] = useState(streaming);
+  useEffect(() => {
+    if (streaming) setOpen(true);
+    else setOpen(false);
+  }, [streaming]);
+  return (
+    <div className={`reasoning ${open ? "open" : ""}`}>
+      <button className="reasoning-head" onClick={() => setOpen((v) => !v)}>
+        <ChevronDown size={12} className="reasoning-chev" />
+        <span>{streaming ? "thinking…" : "reasoning"}</span>
+        <span className="faint small">{text.length.toLocaleString()} chars</span>
+      </button>
+      {open && <div className="reasoning-body">{text}</div>}
     </div>
   );
 }

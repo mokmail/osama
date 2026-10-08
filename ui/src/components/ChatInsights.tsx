@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  AlertTriangle, Brain, CalendarClock, FileCode2, FolderOpen, History, Ruler, Settings2,
-  Sparkles, Wrench, Plus, Trash2, X, Play, Square, Search,
+  AlertTriangle, Brain, CalendarClock, FileCode2, FolderOpen, History, Plug, Ruler, Settings2,
+  Sparkles, Wrench, Plus, Trash2, X, Play, Square,
 } from "lucide-react";
 import { agentApi, type AgentMessagePayload } from "../lib/api";
 import type {
-  AgentTool, BrowseResponse, ContextBreakdown, ContextRequestMessage, MemoryEntry, MemoryStats,
-  PromptSection, RemoteSkill, SkillMeta, TodoItem, WorkspacesResponse, WorkspaceCandidate,
+  AgentTool, BrowseResponse, ContextBreakdown, ContextRequestMessage,
+  MemoryEntry, MemoryStats, PromptSection, RemoteSkill, SkillMeta, TodoItem, WorkspacesResponse, WorkspaceCandidate,
 } from "../lib/types";
 import { fileBase } from "../lib/format";
 import type { StoredChat } from "../lib/chatStore";
 import { MemoryModal, SoulModal } from "./IdentityPanels";
 import { ArtifactsModal } from "./ArtifactBrowser";
+import { McpPanel } from "./McpPanel";
 
 /**
  * The chat insights, rendered INTO the app's left sidebar (portal slot).
@@ -28,7 +29,9 @@ export interface FocusSignal {
   n: number;
 }
 
-export type QuickPanelId = "soul" | "memory" | "skills" | "artifacts" | "workspace" | "scheduler" | "tools" | "settings";
+export type QuickPanelId = "soul" | "memory" | "skills" | "artifacts" | "workspace" | "scheduler" | "tools" | "mcp" | "settings";
+
+const QUICK_PANEL_IDS: QuickPanelId[] = ["soul", "memory", "skills", "artifacts", "workspace", "scheduler", "tools", "mcp", "settings"];
 
 export function ChatInsights({
   baseUrl, agentic, todos, refreshKey, messages, onToolSupport, onWorkspaceChange,
@@ -36,7 +39,7 @@ export function ChatInsights({
   serverUrl, onServerUrl, apiKey, onApiKey, approvalMode, onApprovalMode,
   history, activeId, onNewChat, onOpenChat, onDeleteChat,
   focus, model, compactMessages, onCompactClick, compacting, lastCompaction,
-  personality, onPersonality, livePrompt,
+  personality, onPersonality, livePrompt, contextModel,
 }: {
   baseUrl: string;
   agentic: boolean;
@@ -68,12 +71,14 @@ export function ChatInsights({
   onPersonality: (v: string) => void;
   /** The prompt the last turn actually used, as the server assembled it. */
   livePrompt: { sections: PromptSection[]; chars: number; personality: string; memory: MemoryStats } | null;
+  /** Ollama model name, so the context window uses the model's real size. */
+  contextModel?: string;
 }) {
   const [modal, setModal] = useState<QuickPanelId | null>(null);
 
   // A focus request for a quick panel opens its modal (the inline ones scroll).
   useEffect(() => {
-    if (focus && ["soul", "memory", "skills", "artifacts", "workspace", "scheduler", "tools", "settings"].includes(focus.panel)) {
+    if (focus && (QUICK_PANEL_IDS as string[]).includes(focus.panel)) {
       setModal(focus.panel as QuickPanelId);
     }
   }, [focus]);
@@ -87,6 +92,10 @@ export function ChatInsights({
     return ((await r.json()).artifacts as unknown[]).length;
   }, 8000);
   const jobsCount = usePollCount(() => agentApi.jobs().then((r) => r.jobs.length), 10000);
+  const mcpConnected = usePollCount(
+    () => agentApi.mcpServers().then((r) => r.servers.filter((s) => s.connected).length).catch(() => 0),
+    8000,
+  );
 
   const close = () => setModal(null);
 
@@ -94,7 +103,7 @@ export function ChatInsights({
     <div className="sidebar-insights">
       <div className="nav-group-label">chat</div>
       <HistoryPanel history={history} activeId={activeId} onNewChat={onNewChat} onOpenChat={onOpenChat} onDeleteChat={onDeleteChat} />
-      <ContextPanel baseUrl={baseUrl} agentic={agentic} todos={todos} refreshKey={refreshKey} messages={messages} onToolSupport={onToolSupport} focus={focus} model={model} compactMessages={compactMessages} onCompactClick={onCompactClick} compacting={compacting} lastCompaction={lastCompaction} />
+      <ContextPanel baseUrl={baseUrl} agentic={agentic} todos={todos} refreshKey={refreshKey} messages={messages} onToolSupport={onToolSupport} focus={focus} model={model} compactMessages={compactMessages} onCompactClick={onCompactClick} compacting={compacting} lastCompaction={lastCompaction} contextModel={contextModel} />
 
       <div className="nav-group-label">agent</div>
       <div className="qgrid">
@@ -104,6 +113,7 @@ export function ChatInsights({
         <QuickBtn id="artifacts" icon={<FileCode2 size={14} />} label="Artifacts" badge={artsCount > 0 ? String(artsCount) : undefined} onClick={setModal} />
         <QuickBtn id="workspace" icon={<FolderOpen size={14} />} label="Workspace" onClick={setModal} />
         <QuickBtn id="scheduler" icon={<CalendarClock size={14} />} label="Scheduler" badge={jobsCount > 0 ? String(jobsCount) : undefined} onClick={setModal} />
+        <QuickBtn id="mcp" icon={<Plug size={14} />} label="MCP" badge={mcpConnected > 0 ? String(mcpConnected) : undefined} onClick={setModal} />
         {agentic && <QuickBtn id="tools" icon={<Ruler size={14} />} label="Tools" onClick={setModal} />}
         <QuickBtn id="settings" icon={<Settings2 size={14} />} label="Settings" onClick={setModal} />
       </div>
@@ -116,6 +126,7 @@ export function ChatInsights({
           {modal === "artifacts" && <ArtifactsModal />}
           {modal === "workspace" && <WorkspaceModal onWorkspaceChange={onWorkspaceChange} />}
           {modal === "scheduler" && <SchedulerModal />}
+          {modal === "mcp" && <McpPanel compact />}
           {modal === "tools" && <ToolsModal agentic={agentic} />}
           {modal === "settings" && (
             <SettingsModal
@@ -142,6 +153,7 @@ const MODAL_TITLES: Record<QuickPanelId, string> = {
   workspace: "workspace",
   scheduler: "scheduler",
   tools: "agent tools",
+  mcp: "mcp servers",
   settings: "chat settings",
 };
 
@@ -243,7 +255,7 @@ function relTime(at: number): string {
 
 /* ----------------------------------------------------------- context */
 
-function ContextPanel({ baseUrl, agentic, todos, refreshKey, messages, onToolSupport, focus, model, compactMessages, onCompactClick, compacting, lastCompaction }: {
+function ContextPanel({ baseUrl, agentic, todos, refreshKey, messages, onToolSupport, focus, model, compactMessages, onCompactClick, compacting, lastCompaction, contextModel }: {
   baseUrl: string;
   agentic: boolean;
   todos: TodoItem[];
@@ -256,6 +268,7 @@ function ContextPanel({ baseUrl, agentic, todos, refreshKey, messages, onToolSup
   onCompactClick?: () => void;
   compacting?: boolean;
   lastCompaction?: { at: number; before: number; after: number; reason: string } | null;
+  contextModel?: string;
 }) {
   const [ctx, setCtx] = useState<ContextBreakdown | null>(null);
 
@@ -273,8 +286,9 @@ function ContextPanel({ baseUrl, agentic, todos, refreshKey, messages, onToolSup
     const pull = async () => {
       try {
         // Measure the conversation the user is actually having — not an empty
-        // one, which is why this used to sit at a constant few percent.
-        const c = await agentApi.context(baseUrl, msgsRef.current, agentic);
+        // one, which is why this used to sit at a constant few percent. The
+        // model name lets an Ollama model report its own context window.
+        const c = await agentApi.context(baseUrl, msgsRef.current, agentic, contextModel);
         if (alive) {
           setCtx(c);
           if (c.toolSupport) onToolSupport?.(c.toolSupport);
@@ -286,7 +300,7 @@ function ContextPanel({ baseUrl, agentic, todos, refreshKey, messages, onToolSup
     pull();
     const t = setInterval(pull, 5000);
     return () => { alive = false; clearInterval(t); };
-  }, [baseUrl, agentic, shape, refreshKey]);
+  }, [baseUrl, agentic, shape, refreshKey, contextModel]);
 
   const pct = ctx ? Math.round(ctx.pressure * 100) : 0;
   const tone = !ctx ? "" : pct >= 90 ? "crit" : pct >= 70 ? "warn" : "ok";
@@ -495,6 +509,8 @@ function WorkspaceModal({ onWorkspaceChange }: { onWorkspaceChange?: (w: { path:
       setTyped("");
       setBrowse(null);
       await pull();
+      // Notify the chat view so it refreshes its workspace snapshot + grounding.
+      window.dispatchEvent(new CustomEvent("osama:workspace-changed"));
     } catch (e) {
       setError((e as Error).message);
     } finally {

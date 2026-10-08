@@ -442,6 +442,47 @@ kbd {
 .composer-tool:hover { color: var(--text); border-color: var(--border-strong); }
 
 /* model picker — header trigger ("model ▾") with a dropdown menu, Open WebUI-style */
+/* ------------------------------ provider switch
+   Chat-page only: a compact segmented control choosing between Osama's own
+   llama.cpp server and a local Ollama daemon. Two states, no dropdown. */
+.provswitch {
+  display: inline-flex; flex: none; align-items: stretch;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  overflow: hidden; background: var(--surface);
+}
+.provswitch-btn {
+  padding: 6px 11px; border: 0; background: transparent; cursor: pointer;
+  color: var(--text-faint); font-size: 12px; font-weight: 500;
+  font-family: var(--mono); letter-spacing: 0.02em;
+  transition: color 0.15s, background 0.15s;
+}
+.provswitch-btn:hover { color: var(--text-dim); background: var(--surface-2); }
+.provswitch-btn.on { color: var(--ink); background: var(--text); }
+.provswitch-btn + .provswitch-btn { border-left: 1px solid var(--border); }
+
+/* ------------------------------ reasoning block
+   A thinking model's chain-of-thought (Ollama). Muted and collapsible so it
+   sits clearly apart from the final answer. */
+.reasoning {
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); margin-bottom: 10px; overflow: hidden;
+}
+.reasoning-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 7px 10px; border: 0; background: none; cursor: pointer;
+  color: var(--text-faint); font-size: 11.5px; font-family: var(--mono);
+  text-transform: uppercase; letter-spacing: 0.1em; text-align: left;
+}
+.reasoning-head:hover { color: var(--text-dim); }
+.reasoning-head .faint { text-transform: none; letter-spacing: 0; margin-left: auto; }
+.reasoning-chev { transition: transform 0.18s ease; flex: none; }
+.reasoning.open .reasoning-chev { transform: rotate(180deg); }
+.reasoning-body {
+  padding: 4px 12px 12px; border-top: 1px solid var(--border);
+  color: var(--text-dim); font-size: 12.5px; line-height: 1.6;
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 320px; overflow-y: auto;
+}
+
 .mpick { position: relative; flex: none; }
 .mpick-btn {
   display: inline-flex; align-items: center; gap: 8px; max-width: 460px;
@@ -1148,11 +1189,162 @@ kbd {
 .qjob-dot.ok { background: var(--ok); }
 .qjob-dot.error { background: var(--danger); }
 .qjob-dot.denied { background: var(--warn); }
+.qjob-dot.pending { background: var(--text-faint); }
 
 /* tools modal details */
 .qtool-row { display: flex; align-items: baseline; gap: 10px; }
 .qtool-row .rtag { flex: none; }
 .qtool-desc { font-size: 11.5px; color: var(--text-faint); line-height: 1.5; }
+
+/* ============================================================================
+   MCP — the connection manager (dedicated view + chat sidebar modal)
+   ========================================================================== */
+.mcp-panel { display: flex; flex-direction: column; gap: 14px; }
+.mcp-intro p { margin: 0; line-height: 1.55; }
+.mcp-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.mcp-empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 34px 16px; border: 1px dashed var(--border); border-radius: var(--radius);
+  text-align: center;
+}
+.mcp-presets { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
+.mcp-preset-card {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 7px 12px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-2); color: var(--text-dim); font: inherit; font-size: 12.5px;
+  cursor: pointer; transition: color .15s, border-color .15s, background .15s;
+}
+.mcp-preset-card:hover { color: var(--text); border-color: var(--border-strong); background: var(--surface-3); }
+
+.mcp-list { display: flex; flex-direction: column; gap: 10px; }
+.mcp-card {
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface);
+  padding: 12px 14px; transition: border-color .15s;
+}
+.mcp-card.on { border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
+.mcp-card.off { opacity: .6; }
+.mcp-card-head { display: flex; align-items: flex-start; gap: 11px; }
+.mcp-led { width: 8px; height: 8px; border-radius: 50%; flex: none; margin-top: 5px; background: var(--text-faint); }
+.mcp-led.ok { background: var(--ok); box-shadow: 0 0 0 3px var(--ok-soft); }
+.mcp-led.err { background: var(--danger); }
+.mcp-card-title { flex: 1; min-width: 0; }
+.mcp-name { font-size: 13.5px; font-weight: 500; color: var(--text); }
+.mcp-meta { display: flex; align-items: center; gap: 8px; margin-top: 3px; font-size: 11.5px; }
+.mcp-transport {
+  font-family: var(--mono); font-size: 10px; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px;
+}
+.mcp-ok { color: var(--ok); }
+.mcp-err { color: var(--danger); }
+.mcp-card-actions { display: flex; align-items: center; gap: 2px; flex: none; }
+.mcp-card-actions .btn.icon, .mcp-card-actions .btn { padding: 5px; }
+
+.mcp-cmd {
+  position: relative; margin-top: 10px; padding: 7px 30px 7px 10px;
+  background: var(--surface-2); border-radius: var(--radius-sm);
+  font-size: 11px; color: var(--text-dim); line-height: 1.5;
+  word-break: break-all;
+}
+.mcp-copy {
+  position: absolute; top: 50%; right: 6px; transform: translateY(-50%);
+  background: none; border: 0; color: var(--text-faint); cursor: pointer; padding: 3px;
+  border-radius: 3px; display: inline-flex;
+}
+.mcp-copy:hover { color: var(--text); background: var(--surface-3); }
+
+.mcp-tools-toggle {
+  display: inline-flex; align-items: center; gap: 7px; margin-top: 10px;
+  background: none; border: 0; padding: 0; cursor: pointer;
+  color: var(--text-faint); font: inherit; font-size: 11.5px;
+}
+.mcp-tools-toggle:hover { color: var(--text-dim); }
+.mcp-tools-toggle svg { transition: transform .18s ease; }
+.mcp-tools-toggle svg.rot { transform: rotate(180deg); }
+.mcp-tools {
+  margin-top: 8px; border-top: 1px solid var(--border); padding-top: 8px;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.mcp-tool { display: flex; align-items: baseline; gap: 10px; }
+.mcp-tool-name { font-size: 11.5px; color: var(--text); flex: none; }
+.mcp-tool-desc { font-size: 11px; color: var(--text-faint); flex: 1; line-height: 1.45; }
+.mcp-tool-mode {
+  flex: none; font-family: var(--mono); font-size: 9.5px; text-transform: uppercase;
+  letter-spacing: .1em; padding: 1px 5px; border-radius: 4px;
+}
+.mcp-tool-mode.auto { color: var(--ok); background: var(--ok-soft); }
+.mcp-tool-mode.ask { color: var(--warn); background: var(--warn-soft); }
+
+.mcp-error {
+  padding: 9px 12px; border-radius: var(--radius-sm); font-size: 12px;
+  color: var(--danger); background: var(--danger-soft);
+  border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent);
+}
+
+/* the add/edit form */
+.mcp-form {
+  display: flex; flex-direction: column; gap: 6px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px; background: var(--surface-2); margin-top: 4px;
+}
+.mcp-form-label {
+  font-family: var(--mono); font-size: 9.5px; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--text-faint); margin-top: 6px;
+}
+.mcp-form-label:first-child { margin-top: 0; }
+.mcp-transport-switch { display: flex; gap: 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; width: fit-content; }
+.mcp-transport-switch button {
+  padding: 7px 13px; border: 0; background: transparent; color: var(--text-faint);
+  font: inherit; font-size: 12px; cursor: pointer;
+}
+.mcp-transport-switch button:hover { color: var(--text-dim); background: var(--surface-3); }
+.mcp-transport-switch button.on { color: var(--ink); background: var(--text); }
+.mcp-transport-switch button + button { border-left: 1px solid var(--border); }
+.mcp-trust-check { align-items: flex-start; margin-top: 10px; }
+.mcp-trust-check span { display: flex; flex-direction: column; gap: 2px; }
+.mcp-trust-check .help { font-size: 10.5px; color: var(--text-faint); line-height: 1.4; }
+.mcp-form-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+/* the compact variant inside the chat sidebar modal */
+.mcp-panel.compact .mcp-card { padding: 10px 11px; }
+.mcp-panel.compact .mcp-card-actions .btn { padding: 4px; }
+
+/* the composer's MCP indicator (shown only while servers are connected) */
+.mcp-indicator-wrap { position: relative; flex: none; }
+.mcp-indicator {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 8px; border-radius: 999px; cursor: pointer;
+  border: 1px solid var(--accent-line); background: var(--accent-soft); color: var(--text-dim);
+  font: inherit; font-size: 11px; line-height: 1.6;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.mcp-indicator:hover { color: var(--text); border-color: var(--text-faint); }
+.mcp-indicator-dot {
+  width: 6px; height: 6px; border-radius: 50%; flex: none;
+  background: var(--ok); box-shadow: 0 0 0 2px var(--ok-soft);
+}
+.mcp-indicator-label { font-weight: 500; }
+.mcp-indicator-tools { color: var(--text-faint); }
+.mcp-indicator-tools::before { content: "· "; }
+.mcp-indicator-chev { transition: transform .18s ease; opacity: .7; }
+.mcp-indicator-chev.open { transform: rotate(180deg); }
+
+.mcp-indicator-pop {
+  position: absolute; left: 0; bottom: calc(100% + 8px); z-index: 45;
+  min-width: 240px; max-width: 340px;
+  background: var(--bg-elev); border: 1px solid var(--border-strong);
+  border-radius: 10px; box-shadow: 0 10px 34px rgb(0 0 0 / .45); overflow: hidden;
+}
+.mcp-indicator-row {
+  display: flex; align-items: center; gap: 8px; padding: 7px 12px;
+  font-size: 12px; color: var(--text-dim); border-top: 1px solid var(--border);
+}
+.mcp-indicator-row:first-of-type { border-top: 0; }
+.mcp-indicator-name { color: var(--text); }
+.mcp-indicator-row .faint { margin-left: auto; }
+.mcp-indicator-foot { padding: 8px 12px; border-top: 1px solid var(--border); line-height: 1.5; }
+
+@media (max-width: 620px) { .mcp-indicator-tools { display: none; } }
 
 /* the library's context-size picker (model load) */
 .ctx-picker {
@@ -1283,6 +1475,17 @@ kbd {
 .skill-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .skill-chip { border-color: var(--text-faint); }
 .skill-chip .chip-name { cursor: pointer; }
+
+/* ------------------------------ #-skill mention picker
+   Same dropdown shell as the @-file picker, with a sparkles icon per row and
+   an "active" marker for skills already on for this conversation. */
+.skill-mention-pop { z-index: 42; }
+.skill-mention-row svg { color: var(--text-faint); }
+.skill-mention-row.active svg { color: var(--accent); }
+.skill-mention-row.active .mention-name { color: var(--accent); }
+.skill-mention-row .mention-rel {
+  font-size: 11px;
+}
 
 /* message action bar (Open-WebUI style): revealed on hover, one icon per
    capability — edit / copy / regenerate / continue / fork / delete. */

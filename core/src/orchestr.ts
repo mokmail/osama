@@ -126,10 +126,12 @@ export async function delegateConcurrent(tasks: string[], o: Omit<DelegateOption
 export function orchestrationBlock(): string {
   return [
     "Working rules:",
+    "- Orient with tree/glob/grep before acting; check file_info on large files before reading them.",
     "- Batch independent tool calls in one turn instead of round-tripping serially (reads first, writes after).",
     "- Tool results are authoritative: if a result contradicts your plan, adapt — never claim a step succeeded without a tool result showing it.",
     "- Before declaring a task done, re-check it against every stated requirement; if a verification step is cheap (reading back a file you wrote, recomputing a number), do it.",
     "- If a tool fails, adjust the approach rather than repeating the exact same call.",
     "- Hand self-contained subtasks to a subagent with delegate_task; give it the full context it needs and return only its report.",
+    "- Write real files into the workspace with write_file, and prefer write_script for anything more than a one-line command.",
   ].join("\n");
 }

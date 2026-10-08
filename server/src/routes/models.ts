@@ -326,7 +326,11 @@ export const modelRoutes: RouteModule = (deps) => [
     const body = await readBody(req);
     const base = String(body.baseUrl ?? "http://127.0.0.1:8080");
     const apiKey = body.apiKey ? String(body.apiKey) : undefined;
-    const payload = body.payload ?? body;
+    const payload = { ...(body.payload ?? body) } as Record<string, unknown>;
+    // A non-positive max_tokens means "unlimited". llama.cpp accepts -1, but
+    // Ollama rejects it with invalid_request_error, so drop the field when it
+    // is not a real cap. This is the shared proxy, so it fixes every caller.
+    if (typeof payload.max_tokens === "number" && payload.max_tokens <= 0) delete payload.max_tokens;
     const upstream = await fetch(`${base.replace(/\/$/, "")}/v1/chat/completions`, {
       method: "POST",
       headers: {

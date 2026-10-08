@@ -33,6 +33,9 @@ export interface ChatMessage {
   attachments?: Array<{ id: string; name: string; kind: "text" | "image"; mime: string; size: number; text?: string; dataUrl?: string }>;
   steps?: AgentStep[];
   stepCount?: number;
+  /** A thinking model's chain-of-thought, when the provider streams one
+   *  (Ollama). Shown muted, separate from the final answer. */
+  reasoning?: string;
 }
 
 export interface RunStatus {
@@ -84,6 +87,13 @@ export interface RunRequest {
   history: ChatMessage[];
   /** Pre-fills the assistant bubble (a "continue" starts from shown text). */
   seed?: string;
+  /** Workspace context injected into the system prompt (grounds the chat). */
+  workspace?: { path: string; snapshot: string } | null;
+  /**
+   * The model name to send upstream. llama.cpp ignores it ("local"), but Ollama
+   * requires the real name (e.g. "qwen3:8b") to pick which model to run.
+   */
+  model?: string;
 }
 
 /* --------------------------------------------------------------- state */
@@ -102,6 +112,17 @@ let state: ChatState = {
 
 /** The AbortController for the in-flight run, if this page is the one running it. */
 let current: { runId: string; ac: AbortController } | null = null;
+/**
+ * Prompt ids the user has already answered this session.
+ *
+ * The server clears its `pending` synchronously when it handles the answer, but
+ * there is a small window between the UI clearing the prompt locally and that
+ * response landing. Without this guard a reconcile tick inside that window would
+ * re-add the just-answered prompt — trading the missing-Allow-button bug for a
+ * phantom-Allow-button one. Recording the id makes the reconcile one-way for
+ * anything the user has already dealt with.
+ */
+const answeredPrompts = new Set<string>();
 const subscribers = new Set<(s: ChatState) => void>();
 /** A monotonic clock the UI can render a duration from, without a state write per tick. */
 let runStartedAt = 0;
@@ -158,12 +179,15 @@ export function newSessionId(): string {
 
 /** Replace the transcript (opening a stored chat, starting a new one). */
 export function setMessages(messages: ChatMessage[]): void {
+  stopReconcile();
   set({ messages, prompt: null, todos: [], approval: null, question: null, lastCompaction: null, status: emptyStatus() });
 }
 
 /** Begin a fresh session, clearing the run view. */
 export function resetSession(sessionId = newSessionId()): void {
   runStartedAt = 0;
+  stopReconcile();
+  answeredPrompts.clear();
   set({ sessionId, startedAt: 0, messages: [], prompt: null, todos: [], approval: null, question: null, lastCompaction: null, status: emptyStatus() });
 }
 
@@ -232,6 +256,10 @@ export function startRun(req: RunRequest): void {
   const ac = new AbortController();
   current = { runId: req.runId, ac };
 
+  // Safety net: poll the server's authoritative status so a parked approval is
+  // never missed if its live SSE frame is dropped.
+  startReconcile(req.runId);
+
   void consume(req, ac).catch((e: unknown) => {
     if (!ac.signal.aborted) {
       setStatus({ error: String((e as Error).message).slice(0, 300) });
@@ -249,26 +277,61 @@ async function consume(req: RunRequest, ac: AbortController): Promise<void> {
     .map((m) => ({ role: m.role as "user" | "assistant", content: plainContent(m) }));
 
   let acc = req.seed ?? "";
+  // Ollama thinking models stream their chain-of-thought on a separate channel;
+  // capture it so the user sees progress and the answer stays clean.
+  let reasoning = "";
 
   if (!req.agentic) {
+    // Ground the chat to the selected workspace: inject the layout snapshot
+    // into the system prompt so the model knows where it is, even without
+    // agentic tools. The workspace section sits after the base system text
+    // and follows the same <workspace> convention the agent prompt uses.
+    const baseSystem = req.system?.trim() || "You are a helpful, precise assistant running fully offline on the user's machine.";
+    const workspaceBlock = req.workspace?.snapshot
+      ? `\n\n<workspace>\nYou are chatting about this directory. Use it as context when answering — read paths relative to it.\n${req.workspace.snapshot}\n</workspace>`
+      : "";
+    const systemContent = `${baseSystem}${workspaceBlock}`;
+
     for await (const delta of streamChat(
       {
-        model: "local",
+        // llama.cpp ignores the name and serves its loaded model ("local");
+        // Ollama picks the model by name, so pass the real one when we have it.
+        model: req.model?.trim() || "local",
         messages: [
-          { role: "system", content: req.system?.trim() || "You are a helpful, precise assistant running fully offline on the user's machine." },
+          { role: "system", content: systemContent },
           ...payloadMessages,
         ],
         stream: true as const,
         temperature: req.temperature,
         top_p: req.top_p,
-        ...(req.max_tokens === undefined ? {} : { max_tokens: req.max_tokens }),
+        // Only a positive cap is meaningful. -1/0 mean "unlimited"; llama.cpp
+        // accepts that but Ollama rejects max_tokens <= 0 outright, so the
+        // field is omitted for both — an absent cap is unlimited on either.
+        ...(req.max_tokens && req.max_tokens > 0 ? { max_tokens: req.max_tokens } : {}),
       },
-      { baseUrl: req.baseUrl, apiKey: req.apiKey, signal: ac.signal },
+      {
+        baseUrl: req.baseUrl,
+        apiKey: req.apiKey,
+        signal: ac.signal,
+        onReasoning: (t) => {
+          reasoning += t;
+          patchLast((m) => ({ ...m, reasoning }));
+        },
+      },
     )) {
       acc += delta;
-      patchLast((m) => ({ ...m, content: acc }));
+      // Once there is real answer text, keep it in `content`; reasoning stays
+      // in its own field so the transcript renders them apart.
+      patchLast((m) => ({ ...m, content: acc, ...(reasoning ? { reasoning } : {}) }));
     }
-    if (!acc.trim()) patchLast((m) => ({ ...m, content: "_(empty response — is the server still loading the model?)_" }));
+    // A thinking model that produced only reasoning (or one that stayed silent)
+    // must not leave an empty bubble — fall back to the reasoning text.
+    if (!acc.trim()) {
+      const fallback = reasoning.trim()
+        ? `_The model produced only reasoning, no final answer._\n\n${reasoning.trim()}`
+        : "_(empty response — is the server still loading the model?)_";
+      patchLast((m) => ({ ...m, content: fallback }));
+    }
     finish("done");
     return;
   }
@@ -277,7 +340,7 @@ async function consume(req: RunRequest, ac: AbortController): Promise<void> {
     {
       baseUrl: req.baseUrl,
       apiKey: req.apiKey,
-      model: "local",
+      model: req.model?.trim() || "local",
       runId: req.runId,
       system: req.system?.trim() || undefined,
       personality: req.personality,
@@ -286,7 +349,8 @@ async function consume(req: RunRequest, ac: AbortController): Promise<void> {
       activeSkills: req.activeSkills,
       temperature: req.temperature,
       top_p: req.top_p,
-      ...(req.max_tokens === undefined ? {} : { max_tokens: req.max_tokens }),
+      // Skip non-positive caps: Ollama rejects max_tokens <= 0 (see above).
+      ...(req.max_tokens && req.max_tokens > 0 ? { max_tokens: req.max_tokens } : {}),
     },
     { signal: ac.signal },
   )) {
@@ -363,8 +427,14 @@ async function consume(req: RunRequest, ac: AbortController): Promise<void> {
 function finish(outcome: "done" | "error" | "cancelled"): void {
   current = null;
   runStartedAt = 0;
+  stopReconcile();
+  // A finished turn has no parked prompt. Clearing it here is what stops a
+  // stale Allow / Answer button lingering after the loop ended (e.g. a timed-out
+  // approval) — where clicking it would hit a deleted approval and do nothing.
   set({
     startedAt: 0,
+    approval: null,
+    question: null,
     status: { running: false, waiting: null, runId: null, steps: state.status.steps, elapsedMs: 0, error: outcome === "done" ? null : state.status.error, detached: false },
   });
 }
@@ -401,31 +471,52 @@ async function stopServerRun(runId: string): Promise<void> {
  * The answer goes to the server (which owns the parked turn); the store clears
  * its own prompt because it will not receive another event for this one.
  */
-export async function answerApproval(id: string, allow: boolean): Promise<void> {
+/**
+ * The outcome of answering a parked prompt, so the caller can tell the user
+ * when a button did nothing (its prompt had already expired server-side).
+ */
+export type AnswerOutcome = { ok: true } | { ok: false; reason: string };
+
+export async function answerApproval(id: string, allow: boolean, allowAll = false): Promise<AnswerOutcome> {
+  // Record it before clearing, so a reconcile tick racing the server's response
+  // cannot re-add the prompt the user just answered.
+  answeredPrompts.add(id);
   set({ approval: null });
   setStatus({ waiting: null });
   try {
-    await fetch(`/api/agent/approve/${encodeURIComponent(id)}`, {
+    const res = await fetch(`/api/agent/approve/${encodeURIComponent(id)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ allow }),
+      body: JSON.stringify({ allow, allowAll }),
     });
+    // A 404 means this approval no longer exists on the server — it was already
+    // answered, timed out, or the turn ended. Not a retryable delivery failure:
+    // the prompt was stale, which is exactly why the button "did nothing".
+    if (res.status === 404) {
+      return { ok: false, reason: "that approval had already expired — the command was resolved or the turn ended" };
+    }
+    if (!res.ok) return { ok: false, reason: `the server rejected the answer (HTTP ${res.status})` };
+    return { ok: true };
   } catch (e) {
-    setStatus({ error: `could not deliver the answer: ${(e as Error).message}` });
+    return { ok: false, reason: `could not deliver the answer: ${(e as Error).message}` };
   }
 }
 
-export async function answerQuestion(id: string, answer: string): Promise<void> {
+export async function answerQuestion(id: string, answer: string): Promise<AnswerOutcome> {
+  answeredPrompts.add(id);
   set({ question: null });
   setStatus({ waiting: null });
   try {
-    await fetch(`/api/agent/answer/${encodeURIComponent(id)}`, {
+    const res = await fetch(`/api/agent/answer/${encodeURIComponent(id)}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ answer }),
     });
+    if (res.status === 404) return { ok: false, reason: "that question had already expired — the turn ended" };
+    if (!res.ok) return { ok: false, reason: `the server rejected the answer (HTTP ${res.status})` };
+    return { ok: true };
   } catch (e) {
-    setStatus({ error: `could not deliver the answer: ${(e as Error).message}` });
+    return { ok: false, reason: `could not deliver the answer: ${(e as Error).message}` };
   }
 }
 
@@ -459,6 +550,9 @@ export async function attachToRun(runId: string): Promise<boolean> {
     setStatus({ running: true, detached: false, runId });
     runStartedAt = Date.now();
     set({ startedAt: runStartedAt });
+    // Reattaching is exactly the case where the live frame may already have
+    // passed us by — reconcile from the server's buffer source.
+    startReconcile(runId);
 
     const reader = res.body.getReader();
     const dec = new TextDecoder();
@@ -490,6 +584,10 @@ export async function attachToRun(runId: string): Promise<boolean> {
             setStatus({ waiting: "question" });
           } else if (ev.type === "todos") {
             set({ todos: ev.todos });
+          } else if (ev.type === "done") {
+            // The server's explicit end marker for a turn that already finished;
+            // the reader will close right after, but clearing here is immediate.
+            break;
           }
         } catch {
           /* keep-alive or a partial frame */
@@ -517,5 +615,101 @@ export async function findLiveRun(): Promise<{ runId: string } | null> {
     return live ? { runId: live.runId } : null;
   } catch {
     return null;
+  }
+}
+
+/* ---------------------------------------------------- parked-prompt reconcile */
+
+interface StatusRun {
+  runId: string;
+  status: string;
+  pending:
+    | { kind: "approval"; id: string; command: string; cwd: string }
+    | { kind: "question"; id: string; question: string; options?: string[] }
+    | null;
+}
+
+
+
+/**
+ * Reconcile the parked prompt from the server's authoritative status.
+ *
+ * WHY THIS EXISTS. The server buffers every turn event, so a reload replays a
+ * missed `approval_request` — which is why refreshing used to "fix" the missing
+ * Allow button. Relying on a single live SSE delivery is fragile: the frame can
+ * be lost to a reconnect, a race with the first attach, or a listener added a
+ * beat after the event was emitted. Polling `/api/agent/status` (the same source
+ * the server replays from) closes that gap: whatever the stream missed, the next
+ * status tick surfaces. It is idempotent — it only ever sets a prompt the store
+ * is missing and clears one the server no longer reports — so it cannot fight
+ * the normal event path.
+ */
+async function reconcileParkedPrompt(runId: string): Promise<void> {
+  // Only reconcile the run we are actually watching; a stale run id must not
+  // resurrect a prompt for a turn that already ended.
+  if (state.status.runId !== runId) return;
+  let run: StatusRun | undefined;
+  try {
+    const res = await fetch("/api/agent/status");
+    if (!res.ok) return;
+    const body = (await res.json()) as { runs?: StatusRun[] };
+    run = body.runs?.find((r) => r.runId === runId);
+  } catch {
+    return;
+  }
+  if (state.status.runId !== runId) return; // changed while awaiting the fetch
+
+  if (!run) {
+    // The server no longer knows this turn — it finished between our last event
+    // and now. Let the normal `finish` path own the state; do not invent a stop.
+    return;
+  }
+
+  const pending = run.pending;
+  if (pending?.kind === "approval") {
+    // Never resurrect a prompt the user already answered (see answeredPrompts).
+    if (!answeredPrompts.has(pending.id) && state.approval?.id !== pending.id) {
+      set({ approval: { id: pending.id, command: pending.command, cwd: pending.cwd } });
+      setStatus({ waiting: "approval" });
+    }
+  } else if (pending?.kind === "question") {
+    if (!answeredPrompts.has(pending.id) && state.question?.id !== pending.id) {
+      set({ question: { id: pending.id, question: pending.question, options: pending.options } });
+      setStatus({ waiting: "question" });
+    }
+  } else {
+    // The server reports nothing parked: clear a prompt we are still showing,
+    // because it has been answered (or timed out) on the server side.
+    if (state.approval || state.question) set({ approval: null, question: null });
+    if (state.status.waiting) setStatus({ waiting: null });
+  }
+}
+
+/** The reconcile timer, owned by the store so it survives view remounts. */
+let reconcileTimer: number | undefined;
+
+/**
+ * Start polling `/api/agent/status` for a live run. Idempotent per runId: a
+ * second call for the same run is a no-op, so a remount cannot start a second
+ * poll. Stops itself as soon as the run is no longer running.
+ */
+export function startReconcile(runId: string, intervalMs = 1500): void {
+  if (reconcileTimer !== undefined) return;
+  const tick = async () => {
+    if (!state.status.running || state.status.runId !== runId) {
+      stopReconcile();
+      return;
+    }
+    await reconcileParkedPrompt(runId);
+  };
+  void tick();
+  reconcileTimer = window.setInterval(() => void tick(), intervalMs);
+}
+
+/** Stop the reconcile poll. Called when a run ends or is superseded. */
+export function stopReconcile(): void {
+  if (reconcileTimer !== undefined) {
+    window.clearInterval(reconcileTimer);
+    reconcileTimer = undefined;
   }
 }

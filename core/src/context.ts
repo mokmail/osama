@@ -54,9 +54,25 @@ export function estimateTokens(text: string): number {
   return Math.max(Math.ceil(chars / 4), Math.ceil(words * 1.3));
 }
 
-/** A llama.cpp-backed meter. Every call is scoped to one running server. */
-export function createMeter(base: string): Meter {
+/**
+ * A running server's meter. Every call is scoped to one endpoint.
+ *
+ * Works against both llama.cpp (`/tokenize`, `/apply-template`, `/props`) and
+ * Ollama (`/v1/chat/completions` + `/api/show`): Ollama has no tokenizer route,
+ * so its token counts fall back to the estimate while its window is read from
+ * `/api/show`. `opts.model` names the Ollama model to inspect for the window.
+ */
+export function createMeter(base: string, opts: { model?: string } = {}): Meter {
   const root = base.replace(/\/$/, "");
+  const isOllama = ((): boolean => {
+    try {
+      const u = new URL(root);
+      return u.port === "11434" || /ollama/i.test(u.hostname);
+    } catch {
+      return false;
+    }
+  })();
+  const ollamaModel = opts.model;
 
   const post = async (path: string, body: unknown, timeoutMs = 8000): Promise<any | null> => {
     try {
@@ -107,6 +123,18 @@ export function createMeter(base: string): Meter {
     async window(): Promise<number> {
       const cached = memo.get("window");
       if (cached) return cached;
+      // Ollama has no /props — read the model's window from /api/show.
+      if (isOllama) {
+        if (ollamaModel) {
+          const { ollamaShow } = await import("./ollama.js");
+          const info = await ollamaShow(ollamaModel, root);
+          if (info?.contextLength && Number.isFinite(info.contextLength) && info.contextLength > 0) {
+            memo.set("window", info.contextLength);
+            return info.contextLength;
+          }
+        }
+        return 4096;
+      }
       try {
         const r = await fetch(`${root}/props`, { signal: AbortSignal.timeout(6000) });
         if (r.ok) {

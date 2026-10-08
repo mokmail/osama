@@ -142,18 +142,108 @@ export interface RunAgentOptions {
   allowDelegate?: boolean;
   /** Max concurrent subagents one turn may spawn. */
   maxDelegateConcurrency?: number;
+  /**
+   * Extra tools for this run, on top of the built-ins — currently MCP tools.
+   * Scoped per-run so a scheduled job and an interactive chat can expose
+   * different connected servers.
+   */
+  extraTools?: import("./tools.js").AgentToolSpec[];
+  /**
+   * Executes an MCP tool call by its namespaced name. Supplied by the caller
+   * (the server), so core stays free of transport details. When absent, an MCP
+   * tool call reports "unavailable".
+   */
+  callMcp?: (name: string, args: Record<string, unknown>) => Promise<ToolResult>;
 }
 
-const DEFAULT_MAX_STEPS = 12;
+const DEFAULT_MAX_STEPS = 20;
 
-/** Parse the model's JSON arguments; a truncated blob must not crash the loop. */
+/**
+ * Parse the model's JSON arguments; a truncated or slightly malformed blob must
+ * not crash the loop.
+ *
+ * Small local models routinely wrap arguments in markdown fences, append a
+ * trailing comma, use single quotes, or emit prose around the object. A strict
+ * `JSON.parse` turns all of those into "{}", and the tool then fails with a
+ * confusing "path is required" the model cannot recover from. These repairs are
+ * conservative: each one is only applied when it makes invalid JSON valid, and
+ * the original string is always used as a last resort parse.
+ */
 export function parseArgs(raw: string): Record<string, unknown> {
   if (!raw || !raw.trim()) return {};
+  const asObject = (v: unknown): Record<string, unknown> | null =>
+    v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+
+  // 1. The happy path.
   try {
-    const v = JSON.parse(raw);
-    return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+    const v = asObject(JSON.parse(raw));
+    if (v) return v;
   } catch {
-    return {};
+    /* fall through to repairs */
+  }
+
+  let s = raw.trim();
+
+  // 2. Strip a ```json … ``` (or bare ```) fence around the payload.
+  const fence = /^```(?:json)?\s*([\s\S]*?)\s*```$/i.exec(s);
+  if (fence) s = fence[1]!.trim();
+
+  // 3. If there is prose around the object, take the outermost {...}.
+  if (!s.startsWith("{")) {
+    const first = s.indexOf("{");
+    const last = s.lastIndexOf("}");
+    if (first >= 0 && last > first) s = s.slice(first, last + 1);
+  }
+
+  // 4. Remove trailing commas before } or ] (a common model slip).
+  const deComma = s.replace(/,\s*([}\]])/g, "$1");
+
+  for (const candidate of [s, deComma]) {
+    try {
+      const v = asObject(JSON.parse(candidate));
+      if (v) return v;
+    } catch {
+      /* try the next repair */
+    }
+  }
+
+  // 5. Single-quoted keys/values: convert to double quotes when unambiguous.
+  const single = deComma.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, (_m, inner) => `"${String(inner).replace(/"/g, '\\"')}"`);
+  try {
+    const v = asObject(JSON.parse(single));
+    if (v) return v;
+  } catch {
+    /* give up quietly */
+  }
+
+  return {};
+}
+
+/**
+ * Check the model's arguments against the tool's declared `required` fields.
+ * Returns the first missing key, or null when the call is complete. This lets
+ * the loop answer with a precise "missing required argument: path" the model
+ * can correct, instead of a tool-specific error it has to guess at.
+ */
+export function missingRequiredArg(name: string, args: Record<string, unknown>, extra?: import("./tools.js").AgentToolSpec[]): string | null {
+  const spec = toolByName(name, extra);
+  const params = spec?.parameters as { required?: unknown } | undefined;
+  const required = Array.isArray(params?.required) ? (params!.required as unknown[]) : [];
+  for (const key of required) {
+    const k = String(key);
+    const v = args[k];
+    if (v === undefined || v === null || (typeof v === "string" && v.trim() === "")) return k;
+  }
+  return null;
+}
+
+/** A compact one-line preview of tool arguments, for an approval prompt. */
+export function summarizeArgs(args: Record<string, unknown>): string {
+  try {
+    const s = JSON.stringify(args);
+    return s.length > 240 ? `${s.slice(0, 240)}…` : s;
+  } catch {
+    return "(arguments)";
   }
 }
 
@@ -206,8 +296,11 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
   void query;
   let finalText = "";
 
-  /** The tool schemas are fixed for the run; build them once. */
-  const tools = toolSchemas();
+  /** The tool schemas are fixed for the run; build them once (built-ins + MCP). */
+  const extraTools = opts.extraTools ?? [];
+  const tools = toolSchemas(extraTools);
+  /** True when a name belongs to an injected (MCP) tool rather than a built-in. */
+  const isExtraTool = (name: string): boolean => extraTools.some((t) => t.name === name);
 
   /**
    * Compact when the request would not fit. Runs once before the first model
@@ -341,7 +434,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
     // Concurrency discipline (Hermes rule): independent read-only calls from
     // one turn run concurrently; mutating calls stay sequential and gated so
     // approvals and filesystem writes cannot interleave.
-    const mutatingCalls = calls.filter((c) => (toolByName(c.function.name)?.mutating ?? false));
+    const mutatingCalls = calls.filter((c) => (toolByName(c.function.name, extraTools)?.mutating ?? false));
     const readOnlyCalls = calls.filter((c) => !mutatingCalls.includes(c));
     // Emit events in dispatch order. Reads in parallel => their results are
     // grouped; mutation events interleave exactly as they complete. The
@@ -381,7 +474,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
         { kind: "tool_call", data: { id: call.id, name, args, step } },
       ]);
 
-      const spec = toolByName(name);
+      const spec = toolByName(name, extraTools);
       if (!spec) {
         const content = `unknown tool: ${name}`;
         messages.push({ role: "tool", tool_call_id: call.id, name, content });
@@ -389,10 +482,39 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
         return evs;
       }
 
+      // A precise, recoverable error beats a tool-internal guess. The model
+      // sees exactly which argument is missing and can re-issue the call.
+      const missing = missingRequiredArg(name, args, extraTools);
+      if (missing) {
+        const content = `missing required argument "${missing}" for ${name}. Re-call ${name} with all required fields.`;
+        messages.push({ role: "tool", tool_call_id: call.id, name, content });
+        emit({ type: "tool_result", id: call.id, name, ok: false, summary: `missing arg: ${missing}`, content, durationMs: 0 });
+        return evs;
+      }
+
       const started = Date.now();
       let result: ToolResult;
       try {
-        if (isSchedulerTool(name)) {
+        if (isExtraTool(name)) {
+          // An injected (MCP) tool: gated by the approval policy when the spec
+          // is mutating (an untrusted server), then handed to the caller's MCP
+          // executor. When no executor is wired, report it honestly.
+          if (spec.mutating) {
+            const approved = await opts.approval.approve({ command: `MCP: ${name} ${summarizeArgs(args)}`, cwd: opts.workspace }).catch(() => false);
+            if (!approved) {
+              result = { ok: false, content: "the user denied this MCP tool call", summary: "denied by user" };
+              messages.push({ role: "tool", tool_call_id: call.id, name, content: result.content });
+              emit({ type: "denied", id: call.id, name, reason: "user denied" });
+              emit({ type: "tool_result", id: call.id, name, ok: false, summary: "denied by user", content: result.content, durationMs: Date.now() - started });
+              return evs;
+            }
+          }
+          if (!opts.callMcp) {
+            result = { ok: false, content: `MCP tool ${name} is not available in this run`, summary: "mcp unavailable" };
+          } else {
+            result = await opts.callMcp(name, args);
+          }
+        } else if (isSchedulerTool(name)) {
           result = await executeSchedulerTool(
             name,
             args,
@@ -422,6 +544,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
           result = await executeTool(name, args, {
             workspace: opts.workspace,
             web: opts.web,
+            signal: opts.signal,
             onCommand: spec.mutating
               ? async (command, cwd) => {
                   try {
@@ -451,9 +574,10 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
         { kind: "tool_result", data: { id: call.id, name, ok: result.ok, summary: result.summary, content: result.content.slice(0, 2000), durationMs } },
       ]);
       // A successful write becomes a named artifact the UI can list.
-      if (result.ok && (name === "write_file" || name === "edit_file")) {
+      if (result.ok && (name === "write_file" || name === "edit_file" || name === "write_script" || name === "manage_file" || name === "replace_in_files")) {
+        const file = name === "manage_file" ? String(args.to ?? args.path ?? "") : String(args.path ?? "");
         appendEvents(opts.sessionId ?? "", opts.workspace, [
-          { kind: "artifact", data: { file: String(args.path ?? ""), op: name, summary: result.summary } },
+          { kind: "artifact", data: { file, op: name, summary: result.summary } },
         ]);
       }
       emit({ type: "tool_result", id: call.id, name, ok: result.ok, summary: result.summary, content: result.content, durationMs });

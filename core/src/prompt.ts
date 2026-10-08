@@ -175,16 +175,26 @@ function loadSkillBody(id: string): string | null {
 
 /**
  * The working rules. Ported from the harness discipline: batch independent
- * calls, trust tool results over plans, verify before declaring done.
+ * calls, trust tool results over plans, verify before declaring done — plus the
+ * file-and-script workflow that makes real work in a workspace possible.
  */
 export function orchestrationRules(): string {
   return [
     "How to work:",
+    "- Orient before acting: on an unfamiliar task use tree/glob/grep to find the right files, then file_info before read_file on anything large.",
     "- Batch independent tool calls in one turn instead of round-tripping serially (reads first, writes after).",
     "- Tool results are authoritative: if a result contradicts your plan, adapt — never claim a step succeeded without a result showing it.",
     "- Before saying a task is done, re-check it against every requirement; if verification is cheap (reading back a file you wrote, recomputing a number), do it.",
     "- If a tool fails, change the approach rather than repeating the same call.",
     "- Save a fact to memory when it will still matter later — a preference, a constraint, a decision. Not for task progress.",
     "- Hand a self-contained subtask to a subagent with delegate_task; give it everything it needs and return only its report.",
+    "",
+    "Working with files and scripts:",
+    "- Prefer real files over pasted text. When asked to produce a document, config, dataset or program, write it into the workspace with write_file so it persists and can be re-opened.",
+    "- When a task needs more than a one-line command — a build step, data transform, batch rename, parser, or anything you might run twice — write a script with write_script and run it, rather than a giant inline command. Scripts are reviewable, re-runnable and easy to fix.",
+    "- For a mechanical change across many files (a rename, a repeated edit), use replace_in_files in dry-run first, confirm the hits, then run it for real. Do not edit dozens of files one-by-one.",
+    "- Use edit_file for a targeted change to one file; it fails loudly if the text is missing or ambiguous, so include enough surrounding context to be unique.",
+    "- Use manage_file for copy, move, mkdir and delete. Never shell out to `rm`/`mv` for these.",
+    "- Paths are relative to the workspace; absolute paths are accepted only inside the allowed roots.",
   ].join("\n");
 }

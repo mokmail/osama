@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity, Boxes, Cpu, Download, FileCog, FileCode2, Gauge, HardDrive, Layers, LayoutDashboard, Menu,
-  MessagesSquare, Server as ServerIcon, ShieldCheck, Terminal, Wrench,
+  MessagesSquare, Plug, Server as ServerIcon, ShieldCheck, Terminal, Wrench,
 } from "lucide-react";
 import { api, subscribeEvents } from "./lib/api";
 import type { OsamaEvent, SystemResponse } from "./lib/types";
@@ -16,6 +16,7 @@ import { ChatView } from "./views/Chat";
 import { ProcessesView } from "./views/Processes";
 import { CreateView } from "./views/Create";
 import { ArtifactsView } from "./views/Artifacts";
+import { McpView } from "./views/Mcp";
 import { RunIndicator } from "./components/RunIndicator";
 
 export type ViewId =
@@ -33,12 +34,13 @@ export type ViewId =
   | "evaluate"
   | "inspect"
   | "processes"
-  | "artifacts";
+  | "artifacts"
+  | "mcp";
 
 /** Every view id, for validating a hash or a stored choice before trusting it. */
 const VIEW_IDS: ViewId[] = [
   "dashboard", "chat", "models", "hub", "engine", "server", "run",
-  "create", "quantize", "edit", "lora", "evaluate", "inspect", "processes", "artifacts",
+  "create", "quantize", "edit", "lora", "evaluate", "inspect", "processes", "artifacts", "mcp",
 ];
 
 const NAV: Array<{ group: string; items: Array<{ id: ViewId; label: string; icon: typeof Cpu }> }> = [
@@ -77,7 +79,10 @@ const NAV: Array<{ group: string; items: Array<{ id: ViewId; label: string; icon
   },
   {
     group: "System",
-    items: [{ id: "engine", label: "llama.cpp", icon: HardDrive }],
+    items: [
+      { id: "engine", label: "llama.cpp", icon: HardDrive },
+      { id: "mcp", label: "MCP", icon: Plug },
+    ],
   },
 ];
 
@@ -216,6 +221,7 @@ function Shell() {
             {view === "lora" && <ToolView group="edit" bus={bus} />}
             {view === "processes" && <ProcessesView bus={bus} />}
             {view === "artifacts" && <ArtifactsView bus={bus} />}
+            {view === "mcp" && <McpView bus={bus} onNavigate={setView} />}
           </div>
         </div>
       </main>

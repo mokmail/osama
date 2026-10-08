@@ -17,12 +17,18 @@ import type {
   LocalModel,
   LoraInspection,
   ManagedProcess,
+  McpPreset,
+  McpServerConfig,
+  McpServerStatus,
+  McpToolDef,
   MemoryEntry,
   MemoryOp,
   MemoryResponse,
   MemoryStats,
   MetadataEdit,
   ModelCard,
+  OllamaModel,
+  OllamaStatus,
   ReleaseInfo,
   SeriesSample,
   ServerMetrics,
@@ -102,6 +108,18 @@ export const api = {
 
   serverHealth: (baseUrl: string) => get<{ ok: boolean; status?: number; body?: string; error?: string }>(`/api/server/health?baseUrl=${encodeURIComponent(baseUrl)}`),
 
+  /* ------------------------------------------------------------ ollama provider */
+
+  /** Is the local Ollama daemon up, and which models does it serve? */
+  ollamaStatus: (baseUrl?: string) =>
+    get<OllamaStatus>(`/api/ollama/status${baseUrl ? `?baseUrl=${encodeURIComponent(baseUrl)}` : ""}`),
+  ollamaModels: (baseUrl?: string) =>
+    get<{ models: OllamaModel[]; url: string }>(`/api/ollama/models${baseUrl ? `?baseUrl=${encodeURIComponent(baseUrl)}` : ""}`),
+  ollamaShow: (model: string, baseUrl?: string) =>
+    get<{ model: string; url: string; contextLength?: number; capabilities?: string[] }>(
+      `/api/ollama/show?model=${encodeURIComponent(model)}${baseUrl ? `&baseUrl=${encodeURIComponent(baseUrl)}` : ""}`,
+    ),
+
   /**
    * Poll /health until llama-server answers, so callers can wait for a model to
    * finish loading instead of showing a chat box that is not ready yet.
@@ -140,10 +158,18 @@ export const api = {
   },
 };
 
-/** Chat completion streamed through the local proxy (keeps key handling server-side). */
+/**
+ * Chat completion streamed through the local proxy (keeps key handling server-side).
+ *
+ * Works for both llama.cpp and Ollama: both speak OpenAI-compatible SSE. Ollama
+ * separates a thinking model's chain-of-thought into `delta.reasoning` (llama.cpp
+ * has no equivalent), so that is surfaced through `opts.onReasoning` rather than
+ * being folded into the answer text — the caller can show it as a muted "thinking"
+ * block and keep the final answer clean.
+ */
 export async function* streamChat(
   payload: { model?: string; messages: Array<{ role: string; content: string | Array<Record<string, unknown>> }>; stream: true; temperature?: number; top_p?: number; max_tokens?: number },
-  opts: { baseUrl: string; apiKey?: string; signal?: AbortSignal },
+  opts: { baseUrl: string; apiKey?: string; signal?: AbortSignal; onReasoning?: (text: string) => void },
 ): AsyncGenerator<string, void, unknown> {
   const res = await fetch("/api/chat", {
     method: "POST",
@@ -178,8 +204,12 @@ export async function* streamChat(
           const m = parsed.error.message ?? JSON.stringify(parsed.error);
           throw new Error(`Model error: ${String(m).slice(0, 300)}`);
         }
-        const delta = parsed.choices?.[0]?.delta?.content;
-        if (delta) yield delta as string;
+        const delta = parsed.choices?.[0]?.delta;
+        // A thinking model's reasoning arrives on its own channel.
+        if (typeof delta?.reasoning === "string" && delta.reasoning && opts.onReasoning) {
+          opts.onReasoning(delta.reasoning as string);
+        }
+        if (delta?.content) yield delta.content as string;
       } catch (e) {
         if (e instanceof Error && e.message.startsWith("Model error:")) throw e;
         /* ignore keep-alives */
@@ -281,8 +311,8 @@ export const agentApi = {
    * Measure the current request against the window. POST because a real
    * transcript (with attachment text) does not fit in a query string.
    */
-  context: (baseUrl: string, messages: ContextRequestMessage[] = [], includeTools = true) =>
-    post<ContextBreakdown>("/api/agent/context", { baseUrl, messages, tools: includeTools }),
+  context: (baseUrl: string, messages: ContextRequestMessage[] = [], includeTools = true, model?: string) =>
+    post<ContextBreakdown>("/api/agent/context", { baseUrl, messages, tools: includeTools, ...(model ? { model } : {}) }),
 
   /** Answer a parked approval request. The loop resumes either way. */
   approve: (id: string, allow: boolean) =>
@@ -307,10 +337,17 @@ export const agentApi = {
   /** Files inside the agent workspace — backs the composer's `@` picker. */
   workspaceFiles: () => get<{ path: string; files: WorkspaceFile[]; truncated: boolean }>("/api/workspace/files"),
 
-  /** Inline one workspace file as a text attachment for the current message. */
+  /** Inline one workspace file as a text attachment for the current message.
+   *  PDFs are extracted server-side; large text files are truncated with a note. */
   workspaceFile: (path: string) =>
-    get<{ name: string; rel: string; size: number; mime: string; text: string }>(
+    get<{ name: string; rel: string; size: number; mime: string; text: string; truncated?: boolean; note?: string }>(
       `/api/workspace/file?path=${encodeURIComponent(path)}`,
+    ),
+
+  /** The workspace layout summary — grounds the chat to the selected directory. */
+  workspaceSnapshot: (max = 600) =>
+    get<{ path: string; chosen: boolean; snapshot: string }>(
+      `/api/workspace/snapshot?max=${max}`,
     ),
 
   /** Browse a skills.sh / GitHub source for installable skills. */
@@ -335,6 +372,22 @@ export const agentApi = {
   deleteJob: (id: string) => del<{ ok: boolean }>(`/api/scheduler/jobs/${encodeURIComponent(id)}`),
   runJob: (id: string) => post<{ run: unknown }>(`/api/scheduler/jobs/${encodeURIComponent(id)}/run`, {}),
   jobHistory: (id: string) => get<{ runs: unknown[] }>(`/api/scheduler/jobs/${encodeURIComponent(id)}/history`),
+
+  /* ------------------------------------------------------------------ mcp */
+
+  /** Every configured MCP server, with live connection status. */
+  mcpServers: () => get<{ servers: McpServerStatus[] }>("/api/mcp/servers"),
+  /** Add or update an MCP server. */
+  saveMcpServer: (server: Partial<McpServerConfig> & { name: string }) =>
+    post<{ ok: boolean; server: McpServerConfig; servers: McpServerStatus[] }>("/api/mcp/servers", server),
+  removeMcpServer: (id: string) => del<{ ok: boolean; servers: McpServerStatus[] }>(`/api/mcp/servers/${encodeURIComponent(id)}`),
+  connectMcpServer: (id: string) => post<McpServerStatus>(`/api/mcp/servers/${encodeURIComponent(id)}/connect`, {}),
+  disconnectMcpServer: (id: string) => post<{ ok: boolean; servers: McpServerStatus[] }>(`/api/mcp/servers/${encodeURIComponent(id)}/disconnect`, {}),
+  connectAllMcp: () => post<{ ok: boolean; servers: McpServerStatus[] }>("/api/mcp/connect-all", {}),
+  /** Live tools across all connected servers. */
+  mcpTools: () => get<{ tools: McpToolDef[] }>("/api/mcp/tools"),
+  /** One-click server templates. */
+  mcpPresets: () => get<{ presets: McpPreset[] }>("/api/mcp/presets"),
 };
 
 /**

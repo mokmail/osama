@@ -30,3 +30,5 @@ export * from "./scheduler.js";
 export * from "./orchestr.js";
 export * from "./jobs.js";
 export * from "./sources.js";
+export * from "./ollama.js";
+export * from "./mcp.js";

@@ -279,11 +279,38 @@ export function listWorkspaceFiles(max = 2000, maxDepth = 6): { path: string; fi
  * Read a workspace file chosen from the `@` picker, as a text attachment.
  * The path is confined to the workspace; anything else is refused. Returns a
  * plain shape (not an fs error) so the route can answer 400 with a reason.
+ *
+ * Large files are handled gracefully:
+ * - PDFs (up to 32 MB) are extracted to text server-side via pdf.js, the
+ *   same engine the paperclip attachment path uses.
+ * - Large text files are read up to `maxTextBytes` and truncated with a
+ *   clear marker, so a multi-megabyte log does not blow the context window.
+ * - Other binaries are still refused.
  */
-export function readWorkspaceFile(
+export interface WorkspaceFileResult {
+  ok: true;
+  name: string;
+  rel: string;
+  size: number;
+  mime: string;
+  text: string;
+  /** True when the text was cut short (large text file or PDF page cap). */
+  truncated?: boolean;
+  /** Human note about what happened (e.g. "first 2 MB of 5 MB"). */
+  note?: string;
+}
+
+/** Max bytes to read from a plain-text file before truncating. */
+const MAX_TEXT_INLINE = 2 * 1024 * 1024; // 2 MB — generous but bounded
+/** Max bytes for a PDF before extraction is refused. */
+const MAX_PDF_INLINE = 32 * 1024 * 1024; // 32 MB — matches pdf.ts
+/** How much of a large text file to keep. */
+const TEXT_TRUNCATE_CHARS = 400_000;
+
+export async function readWorkspaceFile(
   rel: string,
-  maxBytes = 512 * 1024,
-): { ok: true; name: string; rel: string; size: number; mime: string; text: string } | { ok: false; error: string } {
+  maxBytes = MAX_TEXT_INLINE,
+): Promise<WorkspaceFileResult | { ok: false; error: string }> {
   const ws = getWorkspace();
   if (!rel || typeof rel !== "string") return { ok: false, error: "a path is required" };
   const abs = path.resolve(ws, rel);
@@ -299,14 +326,78 @@ export function readWorkspaceFile(
   let st: fs.Stats;
   try { st = fs.statSync(absReal); } catch { return { ok: false, error: `${rel} does not exist` }; }
   if (st.isDirectory()) return { ok: false, error: `${rel} is a directory` };
-  if (st.size > maxBytes) return { ok: false, error: `${rel} is too large to inline (${st.size} bytes > ${maxBytes})` };
+
+  const name = path.basename(absReal);
+  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+  const isPdf = ext === "pdf";
+
+  // --- PDF: extract text server-side ---------------------------------------
+  if (isPdf) {
+    if (st.size > MAX_PDF_INLINE) {
+      return { ok: false, error: `${rel} is too large to read (${Math.round(st.size / 1024 / 1024)} MB > ${Math.round(MAX_PDF_INLINE / 1024 / 1024)} MB)` };
+    }
+    try {
+      const { extractPdfText } = await import("./pdf.js");
+      const buf = fs.readFileSync(absReal);
+      const r = await extractPdfText(buf);
+      if (!r.ok || !r.text) return { ok: false, error: r.error ?? "could not extract text from this PDF" };
+      let text = r.text;
+      let note = "";
+      if (r.scanned) note = "scanned PDF — no text layer found";
+      else if (r.truncated) note = "extracted text truncated (page/char cap reached)";
+      if (note) text = `[${note}]\n${text}`;
+      return {
+        ok: true,
+        name,
+        rel: path.relative(ws, absReal).split(path.sep).join("/"),
+        size: st.size,
+        mime: "application/pdf",
+        text,
+        truncated: r.truncated,
+        note: note || undefined,
+      };
+    } catch (e) {
+      return { ok: false, error: `could not read ${rel}: ${(e as Error).message}` };
+    }
+  }
+
+  // --- Plain text: read up to maxBytes, truncate if larger ------------------
+  const readLimit = Math.min(maxBytes, MAX_TEXT_INLINE);
   let buf: Buffer;
-  try { buf = fs.readFileSync(absReal); } catch (e) { return { ok: false, error: `cannot read ${rel}: ${(e as Error).message}` }; }
+  let truncated = false;
+  try {
+    if (st.size > readLimit) {
+      // Read only the beginning — fs.open + read avoids loading the whole file.
+      const fd = fs.openSync(absReal, "r");
+      try {
+        buf = Buffer.alloc(readLimit);
+        fs.readSync(fd, buf, 0, readLimit, 0);
+      } finally {
+        fs.closeSync(fd);
+      }
+      truncated = true;
+    } else {
+      buf = fs.readFileSync(absReal);
+    }
+  } catch (e) {
+    return { ok: false, error: `cannot read ${rel}: ${(e as Error).message}` };
+  }
+
   // binary sniff: a NUL byte in the first 8 KB means "not text"
   const head = buf.subarray(0, 8192);
   if (head.includes(0)) return { ok: false, error: `${rel} looks binary — reference it as a path instead` };
-  const name = path.basename(absReal);
-  const ext = name.split(".").pop()?.toLowerCase() ?? "";
+
+  let text = buf.toString("utf8");
+  let note: string | undefined;
+  if (truncated) {
+    // Cut at a character cap so we do not send a wall of text either.
+    if (text.length > TEXT_TRUNCATE_CHARS) {
+      text = text.slice(0, TEXT_TRUNCATE_CHARS);
+    }
+    note = `first ${Math.round(readLimit / 1024)} KB of ${Math.round(st.size / 1024)} KB`;
+    text = `[truncated: showing ${note}]\n${text}\n… (file continues)`;
+  }
+
   const MIME: Record<string, string> = {
     ts: "text/typescript", tsx: "text/typescript", js: "text/javascript", jsx: "text/javascript",
     py: "text/x-python", rb: "text/x-ruby", rs: "text/x-rust", go: "text/x-go",
@@ -314,5 +405,14 @@ export function readWorkspaceFile(
     yml: "text/yaml", yaml: "text/yaml", toml: "text/plain", html: "text/html", css: "text/css",
     sh: "text/x-shellscript", sql: "text/x-sql", log: "text/plain",
   };
-  return { ok: true, name, rel: path.relative(ws, absReal).split(path.sep).join("/"), size: st.size, mime: MIME[ext] ?? "text/plain", text: buf.toString("utf8") };
+  return {
+    ok: true,
+    name,
+    rel: path.relative(ws, absReal).split(path.sep).join("/"),
+    size: st.size,
+    mime: MIME[ext] ?? "text/plain",
+    text,
+    truncated,
+    note,
+  };
 }

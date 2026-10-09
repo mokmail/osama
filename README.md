@@ -2,8 +2,8 @@
 
 Osama runs GGUF models with llama.cpp entirely on your machine: install an
 engine build, pull models from the Hugging Face hub, serve them, and chat — with
-an agentic mode that can read files, run commands, and work inside a workspace
-you choose.
+an **agent mode** that can read files, run commands, and work inside a workspace
+you choose — off by default, one click away in the chat header.
 
 ## Design language
 
@@ -18,7 +18,7 @@ figures. Light mode follows the OS using the same tokens. No vendor branding.
 | View | What it does |
 |---|---|
 | Dashboard | Live stats: library totals, engines, machine, activity, sparklines |
-| Chat | Chat plus agentic mode; a collapsible insight sidebar on the right |
+| Chat | Plain chat by default — attachments only, no tools; an explicit **Chat / Agent** switch, and a sidebar with history, context and settings |
 | Library | Local GGUF models; scan, add, remove, inspect cards |
 | Discover | Hugging Face hub search and trending |
 | Server | Start/stop llama-server with full parameter control |
@@ -48,7 +48,7 @@ The engine (`npm start`, default `http://127.0.0.1:5178`) serves the UI and:
 | `GET /api/tools`, `POST /api/command/preview`, `POST /api/run` | llama.cpp binary front-ends |
 | `GET /api/processes`, `POST /api/processes`, `POST /api/processes/:id/stop`, `GET /api/processes/:id/log` | process lifecycle |
 | `GET /api/stats`, `/api/stats/series`, `/api/server/metrics` | dashboard aggregates |
-| `GET /api/agent/tools` | the agentic tool registry |
+| `GET /api/agent/tools` | the agent tool registry |
 | `GET /api/agent/context`, `POST /api/agent/context` | exact context-window measurement via the model's own tokenizer |
 | `GET /api/agent/skills`, `GET /api/agent/memory`, `GET /api/agent/todos`, `GET /api/agent/artifacts` | agent state the sidebar shows |
 | `POST /api/agent` | one agentic turn over SSE (tools, approvals, questions) |
@@ -86,14 +86,67 @@ exactly the ones you cannot. It is still not an arbitrary-file-opener: the path
 must already be in this server's own session log, so the caller cannot name
 `/etc` and have it opened.
 
-## Agentic mode
+## Agent mode
 
-Turned on per chat session. 31 tools: files, shell, web (search/fetch/crawl/raw HTTP/download), memory, soul, skills (load/list/create/install), todos, sessions, jobs, context. The server runs the loop: model request → tool
+**Chat is the default.** The header's Chat / Agent switch picks how the current
+conversation answers, and a new chat always opens in **Chat**.
+
+**Chat mode is a plain chat app.** The model gets your messages and whatever
+files you attach — nothing else. No tools, no workspace, no grounding: the
+request carries no tool schemas at all, and the system prompt is exactly what
+you set in Settings. The only extra capability is reading attachments: text
+files and PDFs are inlined into your message, and an image is sent as a real
+image part when the served model has a vision encoder (otherwise it degrades to
+a filename rather than sending bytes the server would reject). The sidebar shows
+your history and the context window; the header shows only the provider, the
+model and the mode.
+
+**Agent mode** is opted into per conversation because it does work you have to
+want: it reads and writes files. Turning it on gives 37 tools: files (including
+`read_document` for PDFs), shell, web
+(search/fetch/crawl/raw HTTP/download), memory, soul, skills
+(load/list/create/install/update), todos, sessions, jobs, context. The server runs the
+loop: model request → tool
 calls → execution → results fed back, streamed over SSE and rendered as a
-collapsible trace in the transcript (12-step cap). Filesystem tools are jailed
+collapsible trace in the transcript.
+
+**The UI shows the work as it happens.** Every tool call is announced to the
+client the moment it is dispatched — not when it returns — so the transcript
+carries a live line ("running command · sleep 12 · step 1 · 3.2s"), the trace
+opens itself and marks the call in flight, and the top-bar chip names it too,
+visible from any page. Read-only calls are dispatched in parallel, so several can
+be in flight at once and the line says `+N more`. Between calls it says the model
+is deciding rather than leaving a stale tool name on screen. Elapsed time ticks
+locally and is replaced by the tool's own reported duration once it finishes.
+Filesystem tools are jailed
 to the chosen workspace plus Osama's own home; any shell command needs explicit
-approval (`ask` mode is the default). Context, memory, skills and artifacts are
-live in the right-hand sidebar.
+approval (`ask` mode is the default). The workspace picker and grounding badge,
+the soul/personality strip, and the context, memory, skills, artifacts,
+scheduler and MCP panels all appear in this mode, because that is where they
+mean something.
+
+**Getting a small model to call tools well.** The loop assumes nothing about the
+model and repairs the four failure modes that actually showed up with a 3B GGUF
+on a real task ("read the text of the first page"):
+
+- *A PDF could not be read at all.* No tool could, so the model invented a URL.
+  `read_document` extracts a workspace PDF's text with pdf.js, page by page,
+  and `page:` reads a single page.
+- *It invented a path and repeated the failing call.* The working rules now say
+  outright: never invent a path or URL, file tools take paths while only
+  `web_search`/`web_fetch` take URLs, and a "does not exist" result means that
+  path is wrong — list the directory instead.
+- *It called a tool on every turn* — for "hi" it asked the user their own
+  question through `ask_user_question` and blocked for two minutes. The rules
+  now say a tool-free turn is normal and `ask_user_question` is only for a detail
+  only the user has.
+- *It serialised arguments wrongly*, e.g. `options: "['4', '5']"` where the
+  schema wants an array. Arguments are coerced to their declared JSON type
+  before dispatch. Sampling is clamped too: an agent turn runs at ≤ 0.3, since
+  the chat slider exists for wording, not for tool correctness.
+
+An empty final answer is retried once at temperature 0 rather than surfaced as
+"the model finished without saying anything".
 
 ## The agent's soul and memory
 
@@ -135,6 +188,31 @@ npm start            # engine on :5178, serving ui/dist
 npm run build        # core + server + ui
 npm run typecheck    # workspace-wide tsc
 ```
+
+**One command from a fresh clone:**
+
+```sh
+git clone https://github.com/mokmail/osama.git
+cd osama
+./start.sh
+```
+
+`start.sh` checks Node (≥ 20.10), installs dependencies, builds core → ui →
+server, and serves the UI on <http://127.0.0.1:5178>. It stops with a clear
+message if a port is taken or the tree is not built, instead of failing
+opaquely. The logic is in `scripts/start.mjs`, so it works on Windows too
+(`node scripts/start.mjs`) and under npm (`npm run start:osama`).
+
+```sh
+./start.sh --dev        # dev mode: hot reload, no build
+./start.sh --check      # install + build + typecheck, then stop
+./start.sh --port 5180  # serve elsewhere
+./start.sh --clean      # redo node_modules and dist from scratch
+./start.sh --help
+```
+
+Osama ships no model: after it starts, install an engine build and pull a GGUF
+from the llama.cpp / Discover pages. An engine with no model answers nothing.
 
 ## Runs survive a page switch
 

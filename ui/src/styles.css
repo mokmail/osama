@@ -460,6 +460,16 @@ kbd {
 .provswitch-btn.on { color: var(--ink); background: var(--text); }
 .provswitch-btn + .provswitch-btn { border-left: 1px solid var(--border); }
 
+/* The chat/agent mode switch is the same control as the provider switch: both
+   pick "how this conversation runs", so they must read as one family. The agent
+   count is a suffix inside the segment rather than a divider — a segment has no
+   room for a second pill. */
+.agentswitch .agent-count {
+  margin-left: 6px; font-family: var(--mono);
+  font-size: 9.5px; letter-spacing: 0.08em;
+  opacity: 0.65;
+}
+
 /* ------------------------------ reasoning block
    A thinking model's chain-of-thought (Ollama). Muted and collapsible so it
    sits clearly apart from the final answer. */
@@ -551,20 +561,48 @@ kbd {
 
 /* ---------------------------------------------------------------- agentic mode */
 
-.agent-toggle {
-  display: inline-flex; align-items: center; gap: 7px;
-  padding: 6px 11px; border-radius: var(--radius-sm);
-  border: 1px solid transparent; background: transparent; color: var(--text-dim);
-  font-size: 13px; font-weight: 500; cursor: pointer;
-  transition: color 0.15s, background 0.15s, border-color 0.15s;
-}
-.agent-toggle:hover { color: var(--text); background: var(--surface-2); }
-.agent-toggle.on { color: var(--text); background: var(--accent-soft); border-color: var(--accent-line); }
-.agent-toggle .agent-count {
-  font-family: var(--mono); font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.08em;
-  color: var(--text-faint); border-left: 1px solid var(--border-strong); padding-left: 7px;
-}
+/* The chat/agent mode switch reuses `.provswitch*` (see the provider switch) —
+   the two pick the same kind of thing, how this conversation runs. */
 
+/* ------------------------------ live agent activity
+   The "which tool is running, and on what" line. It sits above the trace so
+   the answer never needs a click; the dot is the only motion, so scanning the
+   transcript stays calm while the agent works. */
+.arun {
+  display: flex; align-items: center; gap: 8px;
+  margin: 6px 0; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface); font-size: 12px; color: var(--text-dim);
+  min-width: 0;
+}
+.arun-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-faint);
+  animation: arun-pulse 1.4s ease-in-out infinite;
+}
+.arun-dot.tool { background: var(--accent); }
+.arun-dot.hold { background: var(--warn, #d0a000); animation: none; }
+@keyframes arun-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+@media (prefers-reduced-motion: reduce) { .arun-dot { animation: none; } }
+
+.arun-verb { color: var(--text); font-weight: 500; flex: none; }
+.arun-target {
+  font-family: var(--mono); font-size: 11px; color: var(--text-dim);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.arun-note { color: var(--text-faint); font-style: italic; }
+.arun-more {
+  flex: none; font-family: var(--mono); font-size: 10.5px;
+  color: var(--text-faint); border: 1px solid var(--border);
+  border-radius: 999px; padding: 1px 7px;
+}
+.arun-spacer { flex: 1; }
+.arun-step, .arun-time {
+  flex: none; font-family: var(--mono); font-size: 10.5px;
+  color: var(--text-faint); font-variant-numeric: tabular-nums;
+}
+.arun-step::before { content: "· "; }
+.arun-time { min-width: 44px; text-align: right; }
 
 /* the collapsible trace of tool calls under an assistant message */
 .atrace { margin: 8px 0; border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
@@ -588,6 +626,14 @@ kbd {
 .astep-ms { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
 .astep.bad .astep-line { color: var(--err, #e06060); }
 .astep.denied .astep-line { color: var(--warn, #d0a000); }
+/* the call executing right now: the dot replaces the icon so a live step is
+   distinguishable from a finished one without reading the timestamps */
+.astep.live .astep-line { color: var(--accent); }
+.astep-live-dot {
+  flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); animation: arun-pulse 1.2s ease-in-out infinite;
+}
+@media (prefers-reduced-motion: reduce) { .astep-live-dot { animation: none; } }
 .astep-pre {
   margin: 6px 0 0 20px; padding: 8px 10px; border-radius: var(--radius-sm);
   background: var(--bg); border: 1px solid var(--border);

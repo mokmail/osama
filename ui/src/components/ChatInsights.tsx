@@ -83,18 +83,20 @@ export function ChatInsights({
     }
   }, [focus]);
 
-  // badges for the quick-row buttons
-  const memCount = usePollCount(() => agentApi.memory().then((m) => m.stats?.total ?? m.entries.length ?? 0), 8000);
-  const skillsCount = usePollCount(() => agentApi.skills().then((r) => r.skills.length), 20000);
+  // badges for the quick-row buttons — only polled in Agent mode, so plain
+  // chat does not quietly run the agent's state polls behind a simple UI.
+  const memCount = usePollCount(() => agentApi.memory().then((m) => m.stats?.total ?? m.entries.length ?? 0), 8000, agentic);
+  const skillsCount = usePollCount(() => agentApi.skills().then((r) => r.skills.length), 20000, agentic);
   const artsCount = usePollCount(async () => {
     const r = await fetch("/api/agent/artifacts");
     if (!r.ok) return 0;
     return ((await r.json()).artifacts as unknown[]).length;
-  }, 8000);
-  const jobsCount = usePollCount(() => agentApi.jobs().then((r) => r.jobs.length), 10000);
+  }, 8000, agentic);
+  const jobsCount = usePollCount(() => agentApi.jobs().then((r) => r.jobs.length), 10000, agentic);
   const mcpConnected = usePollCount(
     () => agentApi.mcpServers().then((r) => r.servers.filter((s) => s.connected).length).catch(() => 0),
     8000,
+    agentic,
   );
 
   const close = () => setModal(null);
@@ -105,16 +107,23 @@ export function ChatInsights({
       <HistoryPanel history={history} activeId={activeId} onNewChat={onNewChat} onOpenChat={onOpenChat} onDeleteChat={onDeleteChat} />
       <ContextPanel baseUrl={baseUrl} agentic={agentic} todos={todos} refreshKey={refreshKey} messages={messages} onToolSupport={onToolSupport} focus={focus} model={model} compactMessages={compactMessages} onCompactClick={onCompactClick} compacting={compacting} lastCompaction={lastCompaction} contextModel={contextModel} />
 
-      <div className="nav-group-label">agent</div>
+      {/* The agent panels are Agent-mode surface. Plain chat keeps the settings
+          it actually uses (system prompt, sampling, endpoint) and drops
+          everything that only means something to a tool-calling loop. */}
+      <div className="nav-group-label">{agentic ? "agent" : "chat settings"}</div>
       <div className="qgrid">
-        <QuickBtn id="soul" icon={<Sparkles size={14} />} label="Soul" onClick={setModal} />
-        <QuickBtn id="memory" icon={<Brain size={14} />} label="Memory" badge={memCount > 0 ? String(memCount) : undefined} onClick={setModal} />
-        <QuickBtn id="skills" icon={<Wrench size={14} />} label="Skills" badge={skillsCount > 0 ? String(skillsCount) : undefined} onClick={setModal} />
-        <QuickBtn id="artifacts" icon={<FileCode2 size={14} />} label="Artifacts" badge={artsCount > 0 ? String(artsCount) : undefined} onClick={setModal} />
-        <QuickBtn id="workspace" icon={<FolderOpen size={14} />} label="Workspace" onClick={setModal} />
-        <QuickBtn id="scheduler" icon={<CalendarClock size={14} />} label="Scheduler" badge={jobsCount > 0 ? String(jobsCount) : undefined} onClick={setModal} />
-        <QuickBtn id="mcp" icon={<Plug size={14} />} label="MCP" badge={mcpConnected > 0 ? String(mcpConnected) : undefined} onClick={setModal} />
-        {agentic && <QuickBtn id="tools" icon={<Ruler size={14} />} label="Tools" onClick={setModal} />}
+        {agentic && (
+          <>
+            <QuickBtn id="soul" icon={<Sparkles size={14} />} label="Soul" onClick={setModal} />
+            <QuickBtn id="memory" icon={<Brain size={14} />} label="Memory" badge={memCount > 0 ? String(memCount) : undefined} onClick={setModal} />
+            <QuickBtn id="skills" icon={<Wrench size={14} />} label="Skills" badge={skillsCount > 0 ? String(skillsCount) : undefined} onClick={setModal} />
+            <QuickBtn id="artifacts" icon={<FileCode2 size={14} />} label="Artifacts" badge={artsCount > 0 ? String(artsCount) : undefined} onClick={setModal} />
+            <QuickBtn id="workspace" icon={<FolderOpen size={14} />} label="Workspace" onClick={setModal} />
+            <QuickBtn id="scheduler" icon={<CalendarClock size={14} />} label="Scheduler" badge={jobsCount > 0 ? String(jobsCount) : undefined} onClick={setModal} />
+            <QuickBtn id="mcp" icon={<Plug size={14} />} label="MCP" badge={mcpConnected > 0 ? String(mcpConnected) : undefined} onClick={setModal} />
+            <QuickBtn id="tools" icon={<Ruler size={14} />} label="Tools" onClick={setModal} />
+          </>
+        )}
         <QuickBtn id="settings" icon={<Settings2 size={14} />} label="Settings" onClick={setModal} />
       </div>
 
@@ -194,16 +203,26 @@ function QuickBtn({ id, icon, label, badge, onClick }: {
   );
 }
 
-/** One polling-count hook shared by all the badge fetches. */
-function usePollCount(fn: () => Promise<number>, ms: number): number {
+/**
+ * Poll `fn` on a timer, but only while `enabled`.
+ *
+ * The agent's state (memory, skills, jobs, MCP) is fetched for its badges; in
+ * plain chat there is no badge to show, so passing `enabled=false` stops the
+ * request entirely instead of polling for numbers nothing renders.
+ */
+function usePollCount(fn: () => Promise<number>, ms: number, enabled = true): number {
   const [n, setN] = useState(0);
   useEffect(() => {
+    if (!enabled) return;
     let alive = true;
     const pull = () => fn().then((v) => { if (alive) setN(v); }).catch(() => {});
     pull();
     const t = setInterval(pull, ms);
     return () => { alive = false; clearInterval(t); };
-  }, []);
+    // `fn` is a fresh closure every render by design — the timer keys off the
+    // cadence and the enable flag, not the function identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enabled, ms]);
   return n;
 }
 
@@ -324,10 +343,14 @@ function ContextPanel({ baseUrl, agentic, todos, refreshKey, messages, onToolSup
           {ctx.segments.map((s) => <Row key={s.label} label={s.label} value={s.tokens.toLocaleString()} sub />)}
           <div className="rpnote">
             {ctx.exact ? "tokenizer-exact" : "estimated"}
-            {" · "}
-            {ctx.toolSupport === "none" ? "this model cannot call tools" : "schemas always counted"}
+            {agentic && (
+              <>
+                {" · "}
+                {ctx.toolSupport === "none" ? "this model cannot call tools" : "schemas always counted"}
+              </>
+            )}
           </div>
-          {ctx.toolSupport === "none" && (
+          {agentic && ctx.toolSupport === "none" && (
             <div className="rpnote faint">{model ? `${model.slice(0, 40)} has no tool template` : "this model has no tool template"}</div>
           )}
         </>
@@ -335,7 +358,7 @@ function ContextPanel({ baseUrl, agentic, todos, refreshKey, messages, onToolSup
         <Empty text="no running server to measure" />
       )}
 
-      {todos.length > 0 && (
+      {agentic && todos.length > 0 && (
         <>
           <div className="rpsection">task list</div>
           {todos.map((t, i) => <TodoRow key={`${i}-${t.content}`} todo={t} />)}
@@ -759,7 +782,7 @@ function ToolsModal({ agentic }: { agentic: boolean }) {
     agentApi.tools().then((r) => setTools(r.tools)).catch(() => {});
   }, []);
   if (!agentic) {
-    return <Empty text="turn agentic mode on to see the tools the model may call" />;
+    return <Empty text="switch the chat header to Agent mode to see the tools the model may call" />;
   }
   const mut = tools.filter((t) => t.mutating).length;
   return (

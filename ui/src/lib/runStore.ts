@@ -90,6 +90,11 @@ export interface RunRequest {
   /** Workspace context injected into the system prompt (grounds the chat). */
   workspace?: { path: string; snapshot: string } | null;
   /**
+   * Whether the served model accepts images. Images are sent as real content
+   * parts only when this is true; otherwise they degrade to a filename.
+   */
+  vision?: boolean | null;
+  /**
    * The model name to send upstream. llama.cpp ignores it ("local"), but Ollama
    * requires the real name (e.g. "qwen3:8b") to pick which model to run.
    */
@@ -269,12 +274,57 @@ export function startRun(req: RunRequest): void {
   });
 }
 
+/**
+ * A message as the model receives it.
+ *
+ * Attachments are inlined here, not by the caller, because an image has to
+ * become an OpenAI content-part array rather than a string — a text-only
+ * rendering would reduce a screenshot the model can see to a filename. When the
+ * message has no images the content stays a plain string, so the common path is
+ * byte-for-byte what it was.
+ */
+function toModelMessage(m: ChatMessage, supportsVision: boolean): AgentMessagePayload {
+  const attachments = m.attachments ?? [];
+  const textParts: string[] = [];
+  const images: NonNullable<ChatMessage["attachments"]> = [];
+
+  for (const a of attachments) {
+    if (a.kind === "text" && a.text) textParts.push(`--- ${a.name} ---\n${a.text}`);
+    else if (a.kind === "image" && a.dataUrl) images.push(a);
+  }
+
+  if (images.length === 0) {
+    const parts = [...textParts];
+    if (m.content) parts.push(m.content);
+    return { role: m.role as "user" | "assistant", content: parts.join("\n\n") };
+  }
+
+  // A model with no vision encoder cannot decode an image part; a filename is
+  // still more honest than a base64 blob the server will reject.
+  if (!supportsVision) {
+    for (const a of images) textParts.push(`[image attached: ${a.name}]`);
+    const parts = [...textParts];
+    if (m.content) parts.push(m.content);
+    return { role: m.role as "user" | "assistant", content: parts.join("\n\n") };
+  }
+
+  const content: Array<Record<string, unknown>> = [];
+  const text = [...textParts, ...(m.content ? [m.content] : [])].join("\n\n");
+  if (text) content.push({ type: "text", text });
+  for (const a of images) content.push({ type: "image_url", image_url: { url: a.dataUrl } });
+  return { role: m.role as "user" | "assistant", content: content as never };
+}
+
 /** Consume the stream for `req`, writing into the store as it goes. */
 async function consume(req: RunRequest, ac: AbortController): Promise<void> {
   const history = req.history;
+  const wantsImages = req.vision === true;
   const payloadMessages = history
     .filter((m) => m.role !== "assistant" || m.content.trim())
-    .map((m) => ({ role: m.role as "user" | "assistant", content: plainContent(m) }));
+    .map((m) => toModelMessage(m, wantsImages));
+  // `streamChat` accepts a narrower message shape than the agent payload (a
+  // plain string or OpenAI content parts, never null); this is that shape.
+  const chatMessages = payloadMessages as Array<{ role: string; content: string | Array<Record<string, unknown>> }>;
 
   let acc = req.seed ?? "";
   // Ollama thinking models stream their chain-of-thought on a separate channel;
@@ -282,15 +332,11 @@ async function consume(req: RunRequest, ac: AbortController): Promise<void> {
   let reasoning = "";
 
   if (!req.agentic) {
-    // Ground the chat to the selected workspace: inject the layout snapshot
-    // into the system prompt so the model knows where it is, even without
-    // agentic tools. The workspace section sits after the base system text
-    // and follows the same <workspace> convention the agent prompt uses.
-    const baseSystem = req.system?.trim() || "You are a helpful, precise assistant running fully offline on the user's machine.";
-    const workspaceBlock = req.workspace?.snapshot
-      ? `\n\n<workspace>\nYou are chatting about this directory. Use it as context when answering — read paths relative to it.\n${req.workspace.snapshot}\n</workspace>`
-      : "";
-    const systemContent = `${baseSystem}${workspaceBlock}`;
+    // Plain chat: the model gets the conversation and nothing else. No
+    // workspace snapshot, no tool schemas — a chat app, not an agent. The
+    // workspace is what Agent mode is FOR, so injecting it here would ground a
+    // plain conversation in a directory the user never chose to involve.
+    const systemContent = req.system?.trim() || "You are a helpful, precise assistant running fully offline on the user's machine.";
 
     for await (const delta of streamChat(
       {
@@ -299,7 +345,7 @@ async function consume(req: RunRequest, ac: AbortController): Promise<void> {
         model: req.model?.trim() || "local",
         messages: [
           { role: "system", content: systemContent },
-          ...payloadMessages,
+          ...chatMessages,
         ],
         stream: true as const,
         temperature: req.temperature,
@@ -520,19 +566,6 @@ export async function answerQuestion(id: string, answer: string): Promise<Answer
   }
 }
 
-/** A plain-text rendering of a message, for the model payload (text + attachments). */
-function plainContent(m: ChatMessage): string {
-  const parts: string[] = [];
-  if (m.attachments?.length) {
-    for (const a of m.attachments) {
-      if (a.kind === "text" && a.text) parts.push(`--- ${a.name} ---\n${a.text}`);
-      else if (a.kind === "image") parts.push(`[attached image: ${a.name}]`);
-    }
-  }
-  if (m.content) parts.push(m.content);
-  return parts.join("\n\n");
-}
-
 /* ------------------------------------------------- reattach on remount */
 
 /**
@@ -571,9 +604,31 @@ export async function attachToRun(runId: string): Promise<boolean> {
           if (ev.type === "assistant_delta") {
             acc += ev.text;
             patchLast((m) => ({ ...m, content: acc }));
+          } else if (ev.type === "tool_call") {
+            // A reattaching client replays the buffer, so the trace must be
+            // rebuilt here too — otherwise the live "which tool is running" view
+            // is blank for exactly the case it is most useful in: coming back
+            // to a turn that is still going.
+            patchLast((m) => ({ ...m, steps: [...(m.steps ?? []), { id: ev.id, kind: "call" as const, name: ev.name, args: ev.args }] }));
+          } else if (ev.type === "tool_result") {
+            patchLast((m) => {
+              const steps = [...(m.steps ?? [])];
+              const at = steps.findIndex((s) => s.id === ev.id && s.kind === "call");
+              const entry = { id: ev.id, kind: "result" as const, name: ev.name, summary: ev.summary, content: ev.content, ok: ev.ok, durationMs: ev.durationMs };
+              if (at >= 0) steps[at] = entry;
+              else steps.push(entry);
+              return { ...m, steps };
+            });
+          } else if (ev.type === "step") {
+            setStatus({ steps: ev.index + 1 });
+          } else if (ev.type === "denied") {
+            patchLast((m) => ({ ...m, steps: (m.steps ?? []).map((s) => (s.id === ev.id ? { ...s, kind: "denied" as const, ok: false } : s)) }));
+          } else if (ev.type === "compaction") {
+            set({ lastCompaction: { at: Date.now(), before: ev.before, after: ev.after, reason: ev.reason } });
           } else if (ev.type === "final") {
             acc = ev.text || acc;
             patchLast((m) => ({ ...m, content: acc, stepCount: ev.steps }));
+            setStatus({ waiting: null });
           } else if (ev.type === "prompt") {
             set({ prompt: { sections: ev.sections, chars: ev.chars, personality: ev.personality, memory: ev.memory } });
           } else if (ev.type === "approval_request") {

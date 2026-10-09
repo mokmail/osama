@@ -12,7 +12,7 @@ import {
 } from "../lib/runStore";
 import type { AgentQuestion, AgentStep, AgentTool, ContextBreakdown, LocalModel, ManagedProcess, McpServerStatus, MemoryStats, OllamaStatus, PromptSection, SkillMeta, SystemResponse, TodoItem, WorkspaceFile } from "../lib/types";
 import { Badge, Button, Empty, Spinner, useToast } from "../components/ui";
-import { AgentTrace, ApprovalPrompt, QuestionPrompt } from "../components/AgentTrace";
+import { ActivityLine, AgentTrace, ApprovalPrompt, QuestionPrompt } from "../components/AgentTrace";
 import { ChatInsights, type FocusSignal } from "../components/ChatInsights";
 import { IdentityStrip } from "../components/IdentityPanels";
 import { RichContent } from "../components/rich";
@@ -192,40 +192,8 @@ function fenceLang(name: string): string {
 }
 
 /**
- * Turn a stored message into what the server should receive. Text files are
- * inlined as fenced blocks; images become OpenAI content parts only when the
- * model actually accepts images — a text-only model 500s on image parts, so
- * there they are recorded as a text reference instead.
- */
-function buildContent(m: Message, vision: boolean): string | Array<Record<string, unknown>> {
-  const attachments = m.attachments ?? [];
-  const images = attachments.filter((a) => a.kind === "image");
-  let text = m.content;
-
-  for (const a of attachments) {
-    if (a.kind === "text" && a.text !== undefined) {
-      text += `\n\n--- ${a.name} ---\n\`\`\`${fenceLang(a.name)}\n${a.text}\n\`\`\``;
-    }
-  }
-
-  if (images.length === 0) return text;
-
-  if (!vision) {
-    // No vision encoder: describe what was attached rather than sending bytes
-    // the server cannot decode.
-    const note = images.map((a) => `[image attached: ${a.name} (${a.mime}, ${bytes(a.size)})]`).join("\n");
-    return text ? `${text}\n\n${note}` : note;
-  }
-
-  return [
-    { type: "text", text },
-    ...images.map((a) => ({ type: "image_url", image_url: { url: a.dataUrl } })),
-  ];
-}
-
-/**
  * The attachment text a message contributes to the request, kept identical to
- * `buildContent`'s inlining so the measured size matches what is really sent.
+ * `runStore`'s inlining so the measured size matches what is really sent.
  */
 function attachmentText(m: Message): string {
   const out: string[] = [];
@@ -296,7 +264,13 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const [vision, setVision] = useState<boolean | null>(null);
   const [switching, setSwitching] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  /** Agentic mode: the model may call tools while this is on. */
+  /**
+   * How this conversation answers: plain chat, or agentic (the model may call
+   * tools). Chat is the default for a fresh conversation — agentic work needs a
+   * chosen workspace and readable files, so it is opted into per conversation
+   * rather than inherited. The choice is still persisted, so a reload lands in
+   * the mode the conversation was actually using.
+   */
   const [agentic, setAgentic] = useState(false);
   const [agentTools, setAgentTools] = useState<AgentTool[]>([]);
   const [approvalMode, setApprovalMode] = useState<"ask" | "auto">("ask");
@@ -419,11 +393,18 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     agentApi.tools().then((r) => setAgentTools(r.tools)).catch(() => {});
   }, [agentic, agentTools.length]);
 
-  // The chat is grounded in the selected workspace, agentic or not: the
-  // snapshot goes into the system prompt so the model knows which directory
-  // the conversation is about, and @-mentions resolve against it.
+  /**
+   * The workspace belongs to Agent mode. In plain chat there is no directory to
+   * be grounded in, so nothing is fetched at all — no picker, no grounding chip,
+   * no polling. Agent mode keeps the snapshot because its tools resolve paths
+   * against it.
+   */
   const [wsSnapshot, setWsSnapshot] = useState<{ path: string; snapshot: string } | null>(null);
   useEffect(() => {
+    if (!agentic) {
+      setWsSnapshot(null);
+      return;
+    }
     agentApi
       .workspaces()
       .then((w) => setWorkspace({ path: w.current, chosen: w.chosen }))
@@ -444,13 +425,14 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
 
   // Also refresh the workspace + snapshot right after the sidebar changes it.
   useEffect(() => {
+    if (!agentic) return;
     const onWs = () => {
       agentApi.workspaces().then((w) => setWorkspace({ path: w.current, chosen: w.chosen })).catch(() => {});
       agentApi.workspaceSnapshot(600).then((s) => setWsSnapshot({ path: s.path, snapshot: s.snapshot })).catch(() => {});
     };
     window.addEventListener("osama:workspace-changed", onWs);
     return () => window.removeEventListener("osama:workspace-changed", onWs);
-  }, []);
+  }, [agentic]);
 
   // Ollama discovery: poll the daemon while the chat uses it, so a daemon that
   // starts or stops is reflected without a reload. The poll only runs for the
@@ -497,15 +479,17 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     return () => clearInterval(t);
   }, [provider, loadOllama]);
 
-  // MCP: keep the composer's indicator current. Cheap enough to poll while the
-  // chat is mounted, and it refreshes immediately when the MCP panel changes.
+  // MCP: keep the composer's indicator current. Polled only in Agent mode,
+  // because MCP tools only reach the model there — in plain chat the indicator
+  // is not rendered, so the request would exist purely to feed nothing.
   useEffect(() => {
+    if (!agentic) return;
     const pull = () => agentApi.mcpServers().then((r) => setMcpServers(r.servers)).catch(() => {});
     pull();
     const t = setInterval(pull, 8000);
     window.addEventListener("osama:mcp-changed", pull);
     return () => { clearInterval(t); window.removeEventListener("osama:mcp-changed", pull); };
-  }, []);
+  }, [agentic]);
 
   // A server process appears instantly but the model may still be loading, so
   // readiness comes from its own /health and the poll keeps running until then.
@@ -613,6 +597,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       saveHistory(next);
     }
     setChatId(newChatId());
+    // A new conversation opens in the default mode: plain chat. Agent mode is
+    // opted into per conversation, so it must not leak in from the last one.
+    setAgentic(false);
     // The store clears the transcript, the parked prompts and the run status in
     // one step; the session id is what a reload will restore.
     resetSession();
@@ -733,6 +720,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
 
   async function loadWsFiles() {
     if (mentionLoading.current || wsFiles.length) return;
+    // Workspace files exist for Agent mode's `@` picker only; plain chat never
+    // asks the server what is on disk.
+    if (!agentic) return;
     mentionLoading.current = true;
     try {
       setWsFiles((await agentApi.workspaceFiles()).files);
@@ -935,6 +925,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       history: history.map((m) => ({ role: m.role, content: m.content, attachments: m.attachments, steps: m.steps, stepCount: m.stepCount })),
       seed,
       workspace: wsSnapshot,
+      // Whether the served model takes images — decides if an image attachment
+      // is sent as a real content part or degrades to a filename.
+      vision,
       // Ollama needs the real model name; llama.cpp ignores it.
       model: provider === "ollama" ? ollamaModel : "local",
     });
@@ -1097,9 +1090,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   /** The same transcript in the payload shape the compact endpoint expects. */
   const compactMessages = contextMessages as never as AgentMessagePayload[];
 
-  // Inline context readout under the composer: measure the real conversation
-  // against the served window (same endpoint the sidebar panel uses, so the
-  // two always agree), refreshed on transcript changes + every few seconds.
+  // The context meter must measure what the next request will actually contain.
+  // Plain chat sends no tool schemas, so counting them would overstate the
+  // window; only Agent mode includes them.
   const ctxShape = `${messages.length}:${messages.reduce((n, m) => n + (m.content?.length ?? 0), 0)}`;
   useEffect(() => {
     let alive = true;
@@ -1160,22 +1153,39 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     </div>
   );
 
-  const agentToggle = (
-    <button
-      type="button"
-      className={`agent-toggle ${agentic ? "on" : ""}`}
-      onClick={() => { setAgentic((v) => !v); focusInput(); }}
-      title={
-        agentic
-          ? `Agentic mode is ON — the model may call ${agentTools.length || "the"} tools`
-          : "Turn on agentic mode so the model can read files and run commands"
-      }
-      aria-pressed={agentic}
-    >
-      <Sparkles size={14} />
-      <span>Agent</span>
-      {agentic && agentTools.length > 0 && <span className="agent-count">{agentTools.length} tools</span>}
-    </button>
+  /**
+   * The mode control, next to the provider switch and styled the same way.
+   *
+   * It used to be a toggle labelled "Agent": highlighted or not, it read the
+   * same, so the default state (plain chat) was invisible — the header appeared
+   * to be in agent mode whatever you had chosen. Two explicit segments make the
+   * active mode the one you can see, and Chat is the state a new chat opens in.
+   */
+  const modeSwitch = (
+    <div className="provswitch agentswitch" role="group" aria-label="Answer mode">
+      <button
+        type="button"
+        className={`provswitch-btn ${agentic ? "" : "on"}`}
+        onClick={() => { if (agentic) { setAgentic(false); focusInput(); } }}
+        title="Plain chat — the model answers from the conversation alone, with no tools"
+        aria-pressed={!agentic}
+      >
+        Chat
+      </button>
+      <button
+        type="button"
+        className={`provswitch-btn ${agentic ? "on" : ""}`}
+        onClick={() => { if (!agentic) { setAgentic(true); focusInput(); } }}
+        title={
+          agentic
+            ? `Agent mode — the model may call ${agentTools.length || "the"} tools`
+            : "Agent mode — let the model read files and run commands in the workspace"
+        }
+        aria-pressed={agentic}
+      >
+        Agent{agentic && agentTools.length > 0 && <span className="agent-count">{agentTools.length}</span>}
+      </button>
+    </div>
   );
 
   const workspacePicker = (
@@ -1242,7 +1252,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             </div>
           ))}
           <div className="mcp-indicator-foot faint small">
-            Tools are available to the agent while agentic mode is on.
+            Tools are available to the model only in Agent mode.
           </div>
         </div>
       )}
@@ -1299,15 +1309,19 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         <button className="composer-tool" onClick={() => fileRef.current?.click()} title="Attach files (text or images)">
           <Paperclip size={16} />
         </button>
-        <button
-          className={`composer-tool ${activeSkills.length ? "on" : ""}`}
-          onClick={() => { setSkillPick((v) => !v); setSkillQuery(""); void loadSkills(); focusInput(); }}
-          title="Activate skills for this conversation"
-        >
-          <Sparkles size={16} />
-          {activeSkills.length > 0 && <span className="tool-badge">{activeSkills.length}</span>}
-        </button>
-        {skillPick && (
+        {/* Skills, workspace files and MCP are Agent-mode surface. Plain chat
+            keeps only the paperclip: attach something and talk about it. */}
+        {agentic && (
+          <button
+            className={`composer-tool ${activeSkills.length ? "on" : ""}`}
+            onClick={() => { setSkillPick((v) => !v); setSkillQuery(""); void loadSkills(); focusInput(); }}
+            title="Activate skills for this conversation"
+          >
+            <Sparkles size={16} />
+            {activeSkills.length > 0 && <span className="tool-badge">{activeSkills.length}</span>}
+          </button>
+        )}
+        {agentic && skillPick && (
           <div className="skill-pop" role="dialog" aria-label="Active skills">
             <div className="mention-head">
               <span>Skills · {activeSkills.length} active</span>
@@ -1353,7 +1367,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             )}
           </div>
         )}
-        {mention && (
+        {agentic && mention && (
           <div className="mention-pop" role="listbox" aria-label="Workspace files">
             <div className="mention-head">
               <span>Workspace files · @</span>
@@ -1379,7 +1393,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             )}
           </div>
         )}
-        {skillMention && (
+        {agentic && skillMention && (
           <div className="mention-pop skill-mention-pop" role="listbox" aria-label="Skills">
             <div className="mention-head">
               <span>Skills · #</span>
@@ -1417,6 +1431,13 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
           onChange={(e) => {
             setInput(e.target.value);
             autoGrow(e.currentTarget);
+            // `@file` and `#skill` are Agent-mode conveniences: in plain chat
+            // nothing is detected, so typing an @ is just an @.
+            if (!agentic) {
+              if (mention) setMention(null);
+              if (skillMention) setSkillMention(null);
+              return;
+            }
             // Detect @file mentions
             const d = detectMention(e.currentTarget);
             if (d) {
@@ -1459,7 +1480,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             startingServer
               ? "Waiting for the model to finish loading…"
               : runningServer
-                ? "Message your model…  (@ file · # skill · Enter to send · Shift+Enter newline)"
+                ? agentic
+                  ? "Message your model…  (@ file · # skill · Enter to send · Shift+Enter newline)"
+                  : "Message your model…  (drop or attach a file · Enter to send)"
                 : "Pick a model above to start…"
           }
           rows={1}
@@ -1476,7 +1499,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       </div>
       {busy && !streaming && <div className="faint small" style={{ marginTop: 6 }}>Model is loading — you can keep typing.</div>}
       <div className="composer-ctx" aria-live="off">
-        {mcpIndicator}
+        {agentic && mcpIndicator}
         {inlineCtx ? (
           <>
             <span className="composer-ctx-bar" aria-hidden="true">
@@ -1488,7 +1511,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             <span className="composer-ctx-pct">{Math.round(inlineCtx.pressure * 100)}%</span>
             <span className="composer-ctx-detail">
               {inlineCtx.used.toLocaleString()} / {inlineCtx.window.toLocaleString()} tok
-              {toolSupport === "none" ? " · no tool template" : ""}
+              {agentic && toolSupport === "none" ? " · no tool template" : ""}
             </span>
             {compactMessages.length >= 4 && (
               <button className="composer-ctx-compact" onClick={compactNow} disabled={compacting || inlineCtx.pressure < 0.7}
@@ -1510,9 +1533,11 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       <div className="row wrap" style={{ gap: 10 }}>
         {providerSwitch}
         {modelPicker}
-        {agentToggle}
-        {workspacePicker}
-        {workspaceGrounding}
+        {modeSwitch}
+        {/* Workspace belongs to Agent mode: the picker and grounding chip are
+            hidden in plain chat, where there is no directory in play. */}
+        {agentic && workspacePicker}
+        {agentic && workspaceGrounding}
         {provider === "ollama" ? (
           runningServer
             ? <Badge kind="ok"><span className="dot" /> ollama{ollama?.version ? ` ${ollama.version}` : ""}</Badge>
@@ -1523,7 +1548,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
           runningServer ? <Badge kind="ok"><span className="dot" /> server running</Badge> : startingServer ? <Badge kind="info"><span className="dot" /> loading model…</Badge> : <Badge kind="warn">no server — pick a model</Badge>
         )}
         {vision === true && <Badge kind="accent">vision</Badge>}
-        {connectedMcp.length > 0 && (
+        {connectedMcp.length > 0 && agentic && (
           <span title={connectedMcp.map((s) => `${s.config.name} · ${s.toolCount} tool(s)`).join("\n")} style={{ display: "inline-flex" }}>
             <Badge kind="accent"><Plug size={11} /> {mcpToolCount} MCP tool{mcpToolCount === 1 ? "" : "s"}</Badge>
           </span>
@@ -1532,8 +1557,10 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         {agentic && toolSupport === "none" && (
           <Badge kind="warn"><AlertTriangle size={11} /> model can't call tools</Badge>
         )}
-        {/* Identity: which soul is loaded, which voice is active, how full memory is. */}
-        <IdentityStrip personality={personality} onOpen={(p) => setFocus({ panel: p, n: (focus?.n ?? 0) + 1 })} />
+        {/* Identity (soul + personality) is injected into the agentic prompt
+            only, so in plain chat the strip would advertise a voice that is not
+            actually in play. */}
+        {agentic && <IdentityStrip personality={personality} onOpen={(p) => setFocus({ panel: p, n: (focus?.n ?? 0) + 1 })} />}
         <div className="spacer" style={{ flex: 1 }} />
         <Button size="sm" variant="ghost" onClick={newChat} title="Archive this conversation and start a blank one">
           <Plus size={13} /> New chat
@@ -1713,6 +1740,14 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
                         ))}
                       </div>
                     )}
+                    {m.role === "assistant" && streaming && last && agentic && (
+                      <ActivityLine
+                        steps={m.steps}
+                        running={streaming}
+                        waiting={approval ? "approval" : question ? "question" : null}
+                        step={agentStepCount}
+                      />
+                    )}
                     {m.role === "assistant" && m.steps && m.steps.length > 0 && (
                       <AgentTrace
                         steps={m.steps}
@@ -1753,11 +1788,10 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
                     ) : m.attachments?.length ? null : m.steps?.length ? null : (
                       <Spinner />
                     )}
-                    {m.role === "assistant" && streaming && last && agentic && !m.content && (
-                      <div className="faint small" style={{ marginTop: 4 }}>
-                        thinking… {agentStepCount > 0 ? `step ${agentStepCount}` : ""}
-                      </div>
-                    )}
+                    {/* The "thinking…" line that used to sit here is gone: the
+                        ActivityLine above already says what is happening, and
+                        between calls it says the model is deciding — two
+                        indicators for one state only made noise. */}
                     {m.role === "assistant" && approval && last && (
                       <ApprovalPrompt
                         command={approval.command}
@@ -1795,7 +1829,9 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             </div>
             <p className="landing-sub">
               {runningServer
-                ? `Runs entirely on this machine${provider === "ollama" ? " through your Ollama daemon" : ""}. Type @ to reference a workspace file, # to load a skill, or drop a file to attach.`
+                ? agentic
+                  ? `Runs entirely on this machine${provider === "ollama" ? " through your Ollama daemon" : ""}. Type @ to reference a workspace file, # to load a skill, or drop a file to attach.`
+                  : `Runs entirely on this machine${provider === "ollama" ? " through your Ollama daemon" : ""}. Type your message, or drop a file to attach it.`
                 : provider === "ollama"
                   ? "Choose one of your installed Ollama models above, or switch back to llama.cpp."
                   : "Choose a model in the bar above (or serve one from the Server view)."}

@@ -59,7 +59,7 @@ export function McpView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: Vi
         />
         <div className="row wrap" style={{ gap: 10, marginTop: 4 }}>
           <span className="small faint" style={{ flex: 1, minWidth: 240 }}>
-            Tools from connected servers appear in the agent while <b>agentic mode</b> is on. Untrusted
+            Tools from connected servers appear in the chat while <b>Agent mode</b> is on. Untrusted
             servers prompt before each call; trusted ones run automatically.
           </span>
           <Button size="sm" variant="ghost" onClick={() => onNavigate("chat")}>

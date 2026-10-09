@@ -120,8 +120,8 @@ export function McpPanel({ compact = false }: { compact?: boolean }) {
     <div className={`mcp-panel ${compact ? "compact" : ""}`}>
       <div className="mcp-intro">
         <p className="small faint">
-          Connect Osama to Model Context Protocol servers. Their tools become available to the agent
-          in <b>agentic mode</b>, namespaced <span className="mono">mcp__server__tool</span>. Untrusted
+          Connect Osama to Model Context Protocol servers. Their tools become available to the model
+          in <b>Agent mode</b>, namespaced <span className="mono">mcp__server__tool</span>. Untrusted
           servers ask before each tool call; mark one <b>trusted</b> to run its tools without asking.
         </p>
       </div>

@@ -179,7 +179,6 @@ export const agentRoutes: RouteModule = (deps) => {
   function requestApproval(
     areq: { command: string; cwd: string },
     mode: "ask" | "auto",
-    getRes: () => http.ServerResponse,
     signal: AbortSignal,
     runId: string,
     emit: (ev: unknown) => void,
@@ -198,12 +197,13 @@ export const agentRoutes: RouteModule = (deps) => {
     const t = liveTurns.get(runId);
     if (t?.pending?.kind === "approval") t.pending.id = id;
     deps.broadcast("agent_approval", payload);
+    // One delivery only: `emit` both buffers the event and fans it out to every
+    // attached client. It used to be followed by a direct sseSend to the prompt
+    // response, which sent the same event twice to the client that was attached —
+    // and, because the id is patched into the already-buffered event below, made
+    // the FIRST of the pair carry an empty id while the duplicate carried the
+    // usable one.
     emit({ type: "approval_request", ...payload });
-    try {
-      sseSend(getRes(), { type: "approval_request", ...payload });
-    } catch {
-      /* nobody attached right now — the buffer holds it for when they are */
-    }
 
     return new Promise<boolean>((resolve) => {
       // `finish` owns the cleanup so it is identical however it is reached —
@@ -796,9 +796,21 @@ export const agentRoutes: RouteModule = (deps) => {
        */
       const approval = {
         approve: (areq: { command: string; cwd: string }) => {
+          // Arm the parked marker only when the turn will actually park.
+          //
+          // Setting it unconditionally and letting requestApproval clear it was
+          // the bug behind "it keeps telling me that approval had already
+          // expired", and behind auto-approve still looking like it was waiting:
+          // in auto mode requestApproval returns early — before the finish()
+          // that clears the marker — so the turn reported `awaiting_approval`
+          // with a pending prompt for a command that was already running. The
+          // UI's status reconcile then showed a prompt, and answering it 404'd.
+          if (turn.autoApprove || approvalMode === "auto") {
+            return requestApproval(areq, approvalMode, ac.signal, runId, emit);
+          }
           turn.pending = { kind: "approval", id: "", command: areq.command, cwd: areq.cwd };
           turn.status = "awaiting_approval";
-          return requestApproval(areq, approvalMode, () => promptRes, ac.signal, runId, emit);
+          return requestApproval(areq, approvalMode, ac.signal, runId, emit);
         },
       };
 
@@ -850,6 +862,11 @@ export const agentRoutes: RouteModule = (deps) => {
             extraTools: core.mcpToolSpecs(),
             callMcp: core.callMcpTool,
             askUser: (question, timeoutMs) => {
+              // Same rule as the approval path: the parked marker is armed here
+              // because ask_user_question always parks today. If a future
+              // auto-answer path is added, this must move behind the same
+              // "will actually park" test, or it leaves a phantom question that
+              // /api/agent/status keeps reporting after the turn moved on.
               turn.pending = { kind: "question", id: question.id, question: question.question, options: question.options };
               turn.status = "awaiting_answer";
               return askTheUser(question, timeoutMs, () => promptRes, ac.signal, runId, emit);
@@ -874,7 +891,6 @@ export const agentRoutes: RouteModule = (deps) => {
               return requestApproval(
                 { command: `compact ${info.older} older message(s)`, cwd: workspace },
                 approvalMode,
-                () => promptRes,
                 ac.signal,
                 runId,
                 emit,

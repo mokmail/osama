@@ -416,6 +416,10 @@ async function consume(req: RunRequest, ac: AbortController): Promise<void> {
 
       case "tool_call":
         patchLast((m) => ({ ...m, steps: [...(m.steps ?? []), { id: ev.id, kind: "call" as const, name: ev.name, args: ev.args }] }));
+        // A tool is now running, so the turn is not parked on the user any more.
+        // Without this, `waiting` could still read "approval" while the command
+        // was executing (the status poll said so), leaving a stale Allow button.
+        if (state.status.waiting) setStatus({ waiting: null });
         break;
 
       case "tool_result":

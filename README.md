@@ -345,6 +345,27 @@ security boundary for the whole subsystem.
 | `list_skills` | List available skills with one-line descriptions |
 | `create_skill` | Author a new SKILL.md and save it under `.osama/skills` |
 
+**Seven skills ship in the repo**, under `skills/` — the catalogue is scanned
+from there, so they are available on a fresh clone with nothing to install. They
+are language- and platform-neutral, and each is a `SKILL.md` with supporting
+files where it needs them:
+
+| Skill | Use it when |
+|---|---|
+| `systematic-debugging` | A bug needs a root cause, not a guess — four phases, understand before fixing |
+| `spike` | Validating an idea with a throwaway experiment before committing to a build |
+| `simplify-code` | Cleaning up recent changes across several files at once |
+| `blocked-page-recovery` | A fetch fails: 403/429, a paywall, a WAF or bot wall |
+| `humanizer` | Text reads as machine-written and needs a real voice |
+| `plain-language-rewrite` | Rewriting a document at a simpler reading level, in full |
+| `offline-html-report` | Exporting results as one self-contained HTML file |
+
+They use the same SKILL.md convention as the rest of the ecosystem (frontmatter
+with `name` and `description`), so skills authored for other agents work here
+unchanged. The **Skills** panel can also install one from a GitHub source into
+`.osama/skills`, which is scanned alongside the repo directory; a skill in
+`.osama/skills` overrides one of the same id in the repo.
+
 ### Sessions and context
 
 | Tool | What it does |

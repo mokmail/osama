@@ -22,6 +22,7 @@
     "dev:server": "npm run dev -w @osama/server",
     "dev:ui": "npm run dev -w @osama/ui",
     "start": "node scripts/prestart.mjs && node server/dist/index.js",
+    "start:osama": "node scripts/start.mjs",
     "typecheck": "npm run typecheck -w @osama/core && npm run typecheck -w @osama/server && npm run typecheck -w @osama/ui",
     "lint": "npm run typecheck",
     "osama": "node scripts/osama.mjs",

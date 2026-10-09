@@ -181,11 +181,30 @@ function loadSkillBody(id: string): string | null {
 export function orchestrationRules(): string {
   return [
     "How to work:",
+    // The complementary half of "use tools well": a model holding 37 schemas
+    // tends to assume it must call one. Observed: asked "what is 2+2", it called
+    // list_dir, then list_jobs, then ask_user_question — asking the user their
+    // own question and timing out for 250s — and never simply answered.
+    "- A turn with no tool call is normal. Use a tool only when it gets you information or an effect you cannot produce yourself; if the conversation or general knowledge already answers it, answer directly.",
+    "- ask_user_question is for a genuine detail only the user has — a preference, a choice, missing input. Never use it to ask back the user's own question, and never for something you can just do or already know.",
+    "- Pick the tool that matches the task: read_document for a PDF, read_file for text, web_fetch for a URL, list_dir/tree to discover what exists. Do not reach for a generic tool when a specific one fits.",
     "- Orient before acting: on an unfamiliar task use tree/glob/grep to find the right files, then file_info before read_file on anything large.",
     "- Batch independent tool calls in one turn instead of round-tripping serially (reads first, writes after).",
     "- Tool results are authoritative: if a result contradicts your plan, adapt — never claim a step succeeded without a result showing it.",
     "- Before saying a task is done, re-check it against every requirement; if verification is cheap (reading back a file you wrote, recomputing a number), do it.",
     "- If a tool fails, change the approach rather than repeating the same call.",
+    // Observed failure that motivates these two: a small model asked to "read
+    // the first page" invented `https://www.example.com`, called read_file on
+    // that URL as a path, then repeated the identical failing call. The rule
+    // above was already present and did not prevent it, so the specific traps
+    // are named outright.
+    "- Never invent a file path, filename or URL. Only use a path you saw in the workspace listing, a tool result, or the user's message. If you do not have one, call list_dir (or tree) first and use what is actually there.",
+    "- Only web_search/web_fetch take URLs. read_file, edit_file, file_info and the other file tools take filesystem paths — never pass a URL to them.",
+    "- When a tool result says a path does not exist, that path is wrong. Do not call the same tool with it again; list the directory and pick a real entry.",
+    // Third repetition pattern seen in one session: read_file twice with the same
+    // URL, then list_dir twice with the same path. The results were already in
+    // hand and the model simply called again.
+    "- A successful result already answers its question — act on it. Do not repeat a call you have already made and received a result for unless the arguments genuinely changed.",
     "- Save a fact to memory when it will still matter later — a preference, a constraint, a decision. Not for task progress.",
     "- Hand a self-contained subtask to a subagent with delegate_task; give it everything it needs and return only its report.",
     "",

@@ -31,7 +31,7 @@ interface PageLike {
   getTextContent(): Promise<{ items: Array<{ str?: string }> }>;
 }
 
-export async function extractPdfText(data: Buffer | Uint8Array): Promise<ExtractResult> {
+export async function extractPdfText(data: Buffer | Uint8Array, opts: { page?: number } = {}): Promise<ExtractResult> {
   const buf = Buffer.isBuffer(data) ? data : Buffer.from(data);
   if (buf.length === 0) return { ok: false, error: "empty file" };
   if (buf.length > MAX_PDF_BYTES) return { ok: false, error: `PDF is larger than ${Math.round(MAX_PDF_BYTES / 1024 / 1024)} MB` };
@@ -54,13 +54,17 @@ export async function extractPdfText(data: Buffer | Uint8Array): Promise<Extract
       verbosity: 0,
     }).promise;
 
-    const pages = Math.min(doc.numPages, MAX_PAGES);
+    // A single page on request ("read the first page"): read just that one, so a
+    // 300-page PDF answers a page-1 question without extracting 300 pages.
+    const only = opts.page && opts.page > 0 ? Math.min(opts.page, doc.numPages) : 0;
+    const first = only || 1;
+    const pages = only ? only : Math.min(doc.numPages, MAX_PAGES);
     const parts: string[] = [];
     let chars = 0;
     let emptyPages = 0;
     let truncated = false;
 
-    for (let i = 1; i <= pages; i++) {
+    for (let i = first; i <= pages; i++) {
       const page = await doc.getPage(i);
       const content = await page.getTextContent();
       // pdf.js gives positioned items; join with a space, mark line-ish breaks
@@ -96,7 +100,7 @@ export async function extractPdfText(data: Buffer | Uint8Array): Promise<Extract
 }
 
 /** Read a file from disk and extract, for the server's file-based route. */
-export async function extractPdfFile(file: string): Promise<ExtractResult> {
+export async function extractPdfFile(file: string, opts: { page?: number } = {}): Promise<ExtractResult> {
   try {
     const st = fs.statSync(file);
     if (!st.isFile()) return { ok: false, error: "not a file" };
@@ -104,7 +108,7 @@ export async function extractPdfFile(file: string): Promise<ExtractResult> {
     return { ok: false, error: "file does not exist" };
   }
   try {
-    return await extractPdfText(fs.readFileSync(file));
+    return await extractPdfText(fs.readFileSync(file), opts);
   } catch (e) {
     return { ok: false, error: (e as Error).message };
   }

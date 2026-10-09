@@ -237,6 +237,68 @@ export function missingRequiredArg(name: string, args: Record<string, unknown>, 
   return null;
 }
 
+/**
+ * Repair argument values against the tool's schema before dispatch.
+ *
+ * A small model serialises structured arguments as JSON *strings* — observed:
+ * `ask_user_question` called with `options: "['4', '5']"` where the schema wants
+ * an array, and `read_file` called with `offset: "1"` where it wants an integer.
+ * The tool then sees the wrong type and fails on a call the model got logically
+ * right, so the fix belongs here rather than in each tool.
+ *
+ * Conversion is deliberately conservative: only the shapes the schemas actually
+ * declare (array, integer, number, boolean, object), only when the string parses
+ * cleanly, and anything left unparsed passes through untouched so the tool's own
+ * error stays honest.
+ */
+export function coerceArgs(
+  name: string,
+  args: Record<string, unknown>,
+  extra?: import("./tools.js").AgentToolSpec[],
+): Record<string, unknown> {
+  const spec = toolByName(name, extra);
+  const props = (spec?.parameters as { properties?: Record<string, { type?: string }> } | undefined)?.properties;
+  if (!props) return args;
+  const out: Record<string, unknown> = { ...args };
+  for (const [key, raw] of Object.entries(out)) {
+    const want = props[key]?.type;
+    if (!want || typeof raw !== "string") continue;
+    const s = raw.trim();
+    if (!s) continue;
+    const parsed = (): unknown => {
+      try {
+        return JSON.parse(s);
+      } catch {
+        return undefined;
+      }
+    };
+    if (want === "array" || want === "object") {
+      // Two-step on purpose: a small model writes structured args as JSON, but
+      // very often with Python-style single quotes (`options: "['4', '5']"`),
+      // which is not valid JSON. Try the strict parse, then the same text with
+      // quotes normalised. Only for array/object fields, so a genuine apostrophe
+      // in a plain string argument is never touched.
+      const v = parsed() ?? (() => {
+        try {
+          return JSON.parse(s.replace(/'/g, '"'));
+        } catch {
+          return undefined;
+        }
+      })();
+      if (v && typeof v === "object" && (want === "array") === Array.isArray(v)) out[key] = v;
+    } else if (want === "integer" || want === "number") {
+      const n = Number(s);
+      if (Number.isFinite(n)) out[key] = want === "integer" ? Math.trunc(n) : n;
+    } else if (want === "boolean") {
+      const v = parsed();
+      if (typeof v === "boolean") out[key] = v;
+      else if (/^(true|yes|1)$/i.test(s)) out[key] = true;
+      else if (/^(false|no|0)$/i.test(s)) out[key] = false;
+    }
+  }
+  return out;
+}
+
 /** A compact one-line preview of tool arguments, for an approval prompt. */
 export function summarizeArgs(args: Record<string, unknown>): string {
   try {
@@ -366,6 +428,10 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
   }
   let delegateSeq = 0;
   const delegateEvents: AgentEvent[] = [];
+  /** Guards the one empty-answer retry per turn (see the empty-final branch). */
+  let retriedEmpty = false;
+  /** Set for the retry so it is deterministic rather than another sample. */
+  let temperatureOverride: number | undefined;
 
   for (let step = 0; step < maxSteps; step++) {
     yield { type: "step", index: step };
@@ -386,6 +452,8 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
     let text = "";
     const pending = new Map<number, { id?: string; name?: string; args: string }>();
     let finishReason: string | undefined;
+    /** Set once an empty answer is retried; the rest of the turn stays deterministic. */
+    const temperature = temperatureOverride ?? opts.temperature;
 
     try {
       for await (const chunk of opts.transport({
@@ -393,7 +461,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
         messages,
         tools,
         stream: true,
-        temperature: opts.temperature,
+        temperature,
         top_p: opts.top_p,
         max_tokens: opts.max_tokens,
         signal: opts.signal,
@@ -424,6 +492,24 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
 
     if (calls.length === 0) {
       finalText = text;
+      // A model that stops with no content at all has not answered — it has
+      // silently ended the turn. Observed with a small local model on a tool
+      // task: no call, no text, and the user saw "the model finished without
+      // saying anything". Rather than hand that back, re-prompt once, at
+      // temperature 0 so the retry is not another sample of the same lottery;
+      // if the model still says nothing, let the normal empty-final path
+      // report it instead of looping.
+      if (!finalText.trim() && !retriedEmpty && step + 1 < maxSteps) {
+        retriedEmpty = true;
+        temperatureOverride = 0;
+        messages.push({
+          role: "user",
+          content:
+            "Your previous reply was empty. Answer now in plain text — a tool call only if you genuinely need one.",
+        });
+        yield { type: "step", index: step };
+        continue;
+      }
       appendEvents(opts.sessionId ?? "", opts.workspace, [
         { kind: "message", data: { role: "assistant", preview: finalText.slice(0, 2000), steps: step + 1 } },
       ]);
@@ -436,7 +522,31 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
     // approvals and filesystem writes cannot interleave.
     const mutatingCalls = calls.filter((c) => (toolByName(c.function.name, extraTools)?.mutating ?? false));
     const readOnlyCalls = calls.filter((c) => !mutatingCalls.includes(c));
-    // Emit events in dispatch order. Reads in parallel => their results are
+    /**
+     * Announce EVERY call before dispatching any of them.
+     *
+     * A generator cannot yield while it is awaiting a tool, so the call event
+     * has to leave here first or the client only learns about a tool once it has
+     * already finished — which made a 30-second crawl indistinguishable from an
+     * instant directory listing, and left the UI with nothing to show while the
+     * agent worked. Announcing up front also matches what actually happens:
+     * read-only calls are dispatched in parallel, so several ARE in flight at
+     * once, and the client can now say so.
+     *
+     * `runOneTool` therefore does NOT emit `tool_call`; it records the call in
+     * the session log and returns only its result.
+     */
+    for (const call of [...readOnlyCalls, ...mutatingCalls]) {
+      yield {
+        type: "tool_call",
+        id: call.id,
+        name: call.function.name,
+        args: parseArgs(call.function.arguments),
+        raw: call.function.arguments,
+      };
+    }
+
+    // Emit results in dispatch order. Reads in parallel => their results are
     // grouped; mutation events interleave exactly as they complete. The
     // transcript (`messages`) is mutated inside runOneTool in completion order,
     // which keeps each tool reply adjacent to its request either way.
@@ -463,13 +573,19 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
      * Execute one tool call: mutates `messages` (the transcript), returns the
      * events the caller should yield, in order. Pure orchestration — no
      * yields of its own, so it works for concurrent and sequential dispatch.
+     *
+     * It does NOT emit `tool_call`: the caller announces every call before
+     * dispatching (see above), because a generator cannot yield while awaiting
+     * and the call must reach the client BEFORE the work starts. Here the call
+     * only goes to the session log.
      */
     async function runOneTool(call: ToolCall, mode: "parallel" | "sequential"): Promise<AgentEvent[]> {
       const evs: AgentEvent[] = [];
       const emit = (e: AgentEvent) => evs.push(e);
       const name = call.function.name;
-      const args = parseArgs(call.function.arguments);
-      emit({ type: "tool_call", id: call.id, name, args, raw: call.function.arguments });
+      // Repair JSON-as-string arguments before anything type-sensitive looks at
+      // them, so a logically-correct call is not rejected on its serialisation.
+      const args = coerceArgs(name, parseArgs(call.function.arguments), extraTools);
       appendEvents(opts.sessionId ?? "", opts.workspace, [
         { kind: "tool_call", data: { id: call.id, name, args, step } },
       ]);

@@ -16,6 +16,17 @@ import { fail, json, q, readBody, route, sseOpen, sseSend, type RouteModule } fr
  * the HTTP/SSE adaptation and the parked-request bookkeeping.
  */
 
+/**
+ * Ceiling on sampling temperature for an agent turn.
+ *
+ * Tool-calling is a structured-output problem, and small local models get
+ * materially worse at it as temperature rises — invented arguments, a tool call
+ * on a turn that needs none, the same failing call repeated. The chat slider
+ * exists for prose style, so the agent path clamps whatever it is handed
+ * instead of letting a setting meant for wording change tool behaviour.
+ */
+const AGENT_TEMP_CEILING = 0.3;
+
 const TOOL_TIMEOUT_MS = 120_000;
 const APPROVAL_TIMEOUT_MS = 120_000;
 
@@ -819,7 +830,15 @@ export const agentRoutes: RouteModule = (deps) => {
             maxSteps: Number.isFinite(body.maxSteps) ? Number(body.maxSteps) : undefined,
             approval,
             signal: ac.signal,
-            temperature: typeof body.temperature === "number" ? body.temperature : undefined,
+            // Tool-call correctness is far more sensitive to sampling than
+            // prose is: at 0.7–0.8 the local 3B invents arguments and reaches
+            // for a tool on a turn that needs none. The agent path therefore
+            // caps the requested temperature (still honours anything lower) so
+            // the chat slider cannot silently degrade tool reliability.
+            temperature: Math.min(
+              Number.isFinite(body.temperature) ? Number(body.temperature) : AGENT_TEMP_CEILING,
+              AGENT_TEMP_CEILING,
+            ),
             top_p: typeof body.top_p === "number" ? Number(body.top_p) : undefined,
             max_tokens: typeof body.max_tokens === "number" ? Number(body.max_tokens) : undefined,
             meter: core.createMeter(base, { model }),

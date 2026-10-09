@@ -15,6 +15,7 @@ import {
   type JobApproval, MIN_INTERVAL_MIN, type ScheduledJob,
 } from "./scheduler.js";
 import { delegateConcurrent } from "./orchestr.js";
+import { extractPdfFile } from "./pdf.js";
 
 /** How long ask_user_question waits before telling the model to carry on. */
 export const QUESTION_TIMEOUT_MS = 120_000;
@@ -349,6 +350,22 @@ export const AGENT_TOOLS: AgentToolSpec[] = [
         content: { type: "string", description: "Full file content." },
       },
       required: ["path", "content"],
+    },
+  },
+  {
+    name: "read_document",
+    description:
+      "Extract the text of a PDF (or a plain text file) inside the workspace, page by page. "
+      + "Use this — not read_file — to read a PDF. The result is marked '--- page N ---' so you can answer about a specific page; "
+      + "pass page to read just one page (page 1 is the first page).",
+    mutating: false,
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Path to the PDF, absolute or relative to the workspace." },
+        page: { type: "integer", description: "Read only this page (1-based). Omit to read all pages." },
+      },
+      required: ["path"],
     },
   },
   {
@@ -1264,6 +1281,30 @@ export async function executeTool(name: string, args: Record<string, unknown>, o
 
   try {
     switch (name) {
+      case "read_document": {
+        // Reading a PDF is not reading a text file: it needs extraction, and it
+        // needs to reach the model as text because a text-only model cannot take
+        // the bytes. This closes the gap where no tool could read a document at
+        // all, while the prompt inspector showed the extractor existed.
+        const r = resolve(args.path, readRoots());
+        if (!r.ok) return { ok: false, content: r.error, summary: "blocked (path)" };
+        let st: fs.Stats;
+        try { st = fs.statSync(r.path); } catch { return { ok: false, content: `${r.path} does not exist`, summary: "no file" }; }
+        if (st.isDirectory()) return { ok: false, content: `${r.path} is a directory — use list_dir to find the document`, summary: "not a file" };
+        const head = await fsp.readFile(r.path).then((b) => b.subarray(0, 5).toString("latin1")).catch(() => "");
+        const isPdf = head.startsWith("%PDF-") || r.path.toLowerCase().endsWith(".pdf");
+        if (!isPdf) {
+          // Not a PDF — plain text is already readable, so point at the right tool
+          // instead of duplicating read_file's behaviour.
+          return executeTool("read_file", args, opts);
+        }
+        const page = Number(args.page) > 0 ? Number(args.page) : undefined;
+        const out = await extractPdfFile(r.path, page ? { page } : {});
+        if (!out.ok) return { ok: false, content: out.error ?? "could not read the PDF", summary: "read failed" };
+        const what = page ? `page ${page}` : `${out.pages ?? "?"} page${out.pages === 1 ? "" : "s"}`;
+        const note = out.scanned ? " (no text layer — likely scanned)" : out.truncated ? " (truncated)" : "";
+        return { ok: true, content: out.text ?? "", summary: `${what} of ${path.basename(r.path)}${note}` };
+      }
       case "read_file": {
         const r = resolve(args.path, readRoots());
         if (!r.ok) return { ok: false, content: r.error, summary: "blocked (path)" };

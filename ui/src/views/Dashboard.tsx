@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import {
-  Boxes, Cpu, Download, Gauge, HardDrive, MessagesSquare, Server as ServerIcon, Terminal, Wrench,
+  Boxes, Cpu, Download, Gauge, Globe, HardDrive, MessagesSquare, Server as ServerIcon, Terminal, Wrench,
 } from "lucide-react";
 import { agentApi, api } from "../lib/api";
 import type { AgentStats, ServerMetrics, SeriesSample, StatsSnapshot, SystemResponse } from "../lib/types";
@@ -113,6 +113,8 @@ export function Dashboard({ system, bus, onNavigate }: { system: SystemResponse 
         </Card>
 
         <QuickActions onNavigate={onNavigate} />
+
+        <DevelopedBy />
       </div>
     </NavContext.Provider>
   );
@@ -838,6 +840,42 @@ function Sparkline({
         {values.length > 1 && <path className="line" d={line} />}
       </svg>
     </div>
+  );
+}
+
+/* --------------------------------------------------------------- the credit */
+
+/**
+ * Who made this, and where to find them.
+ *
+ * Kept as one quiet line at the foot of the Dashboard rather than in a dialog:
+ * it is the only link on the page that leaves the app, and it should be visible
+ * without being in the way. The version comes from the running server, so the
+ * number here is the build you are actually talking to.
+ */
+function DevelopedBy() {
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    api.health().then((h) => setVersion(h.version)).catch(() => {});
+  }, []);
+  return (
+    <footer className="dash-foot">
+      <span className="mono">Osama{version ? ` ${version}` : ""}</span>
+      <span className="sep">·</span>
+      <span>MIT licensed</span>
+      <span className="sep">·</span>
+      <span>runs on this machine only</span>
+      <div className="spacer" style={{ flex: 1 }} />
+      <span className="row" style={{ gap: 7, alignItems: "center" }}>
+        <Globe size={12} />
+        <span>Developed by</span>
+        <span style={{ color: "var(--text-dim)" }}>Mohammed Kmail</span>
+        <span className="sep">·</span>
+        <a href="https://kmail.at" target="_blank" rel="noreferrer noopener" title="https://kmail.at">
+          kmail.at
+        </a>
+      </span>
+    </footer>
   );
 }
 

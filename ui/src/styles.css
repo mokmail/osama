@@ -1849,3 +1849,20 @@ kbd {
   color: var(--warn, #d08770);
 }
 .runcut span { flex: 1; min-width: 200px; color: var(--text); }
+
+/* ------------------------------------------------------------ developer --- */
+/* The credit at the foot of the Dashboard: one line, a hairline rule above it,
+   and the author's site in the same muted treatment as the rest of the meta
+   text. It is the only link on that page that leaves the app. */
+.dash-foot {
+  display: flex; align-items: center; gap: 9px; flex-wrap: wrap;
+  margin-top: 6px; padding: 15px 2px 8px 2px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-faint);
+}
+.dash-foot .sep { opacity: 0.55; }
+.dash-foot a {
+  color: var(--text-dim); text-decoration: none;
+  border-bottom: 1px solid var(--border-strong);
+}
+.dash-foot a:hover { color: var(--text); border-bottom-color: var(--text-faint); }

@@ -111,7 +111,15 @@ export const mlxRoutes: RouteModule = (deps) => [
       url: `http://${host}:${port}`,
     });
     core.onProcessLine(info.id, (line) => deps.broadcast("process", { id: info.id, line }));
-    core.onProcessExit(info.id, (p) => deps.broadcast("process", { id: info.id, stage: "exit", proc: p }));
+    core.onProcessExit(info.id, (p) => {
+      deps.broadcast("process", { id: info.id, stage: "exit", proc: p });
+      // A failed load leaves a traceback; the hint turns it into the one sentence
+      // that says what to do — the difference between a stuck spinner and a fix.
+      if (p.status === "failed" || (typeof p.exitCode === "number" && p.exitCode !== 0)) {
+        const hint = core.mlxFailureHint(core.processLog(info.id, 200));
+        if (hint) deps.broadcast("mlx", { stage: "error", error: hint, processId: info.id });
+      }
+    });
     json(res, 201, {
       process: info,
       command: `cd ${cmd.cwd} && ${[cmd.tool, ...cmd.argv].join(" ")}`,
@@ -191,7 +199,7 @@ export const mlxRoutes: RouteModule = (deps) => [
     const dir = String(body.dir ?? "");
     if (!dir) return fail(res, 400, new Error("dir is required"));
     try {
-      json(res, 200, { ok: true, ...core.removeMlxModel(dir) });
+      json(res, 200, { ok: true, ...(await core.removeMlxModel(dir, { force: body.force === true })) });
     } catch (e) {
       fail(res, 409, e);
     }

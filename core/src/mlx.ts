@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { childEnv, engineKindForServer, listProcesses, servedModelForServer } from "./processes.js";
+import { childEnv, engineKindForServer, listProcesses, servedModelForServer, stopProcess, type ManagedProcessInfo } from "./processes.js";
 import { downloadFile } from "./downloader.js";
 
 /** Local alias: keeps the import list at the top of this module readable. */
@@ -370,6 +370,13 @@ export interface MlxModel {
   addedAt: string;
   /** true when an adapter (adapters.safetensors) sits beside the weights */
   hasAdapter?: boolean;
+  /**
+   * false when the managed mlx-lm has no implementation for this architecture.
+   * Undefined when it could not be determined (an interpreter that is not there).
+   */
+  servable?: boolean;
+  /** the sentence to show when `servable` is false */
+  servableNote?: string;
 }
 
 function readJson(file: string): any | undefined {
@@ -426,12 +433,28 @@ export function describeMlxModel(dir: string, origin: MlxModel["origin"] = "mode
   }
   const config = readJson(path.join(dir, "config.json")) ?? {};
   const quant = config.quantization ?? config.quantization_config;
+  const modelType = typeof config.model_type === "string" ? config.model_type : undefined;
+  const known = mlxArchitectures();
+  // A model whose architecture the runtime does not implement is a download that
+  // cannot run: mlx-lm raises on load (or, for a config with no model_type at all,
+  // serves something that answers nothing). Say so on the tile rather than offering
+  // a "Serve" button that leads to a stuck load.
+  // No model_type at all is not a mystery: mlx-lm has nothing to load, which is
+  // exactly what an ASR or vision conversion looks like from here. Unknown only
+  // when the runtime itself could not be read.
+  const servable = modelType ? known === null || known.has(modelType.toLowerCase()) : false;
   return {
     id: path.basename(dir),
     name: path.basename(dir),
     dir,
     sizeBytes,
     files,
+    servable,
+    servableNote: servable === false
+      ? modelType
+        ? `mlx-lm has no implementation for model_type "${modelType}" — this model cannot be served here.`
+        : "config.json has no model_type — this is not a text-generation model mlx-lm can load."
+      : undefined,
     architecture: Array.isArray(config.architectures) ? config.architectures[0] : config.model_type,
     quantization: quant
       ? { bits: quant.bits, groupSize: quant.group_size ?? quant.groupSize }
@@ -595,6 +618,89 @@ export function mlxServeCommand(
  * model's own `config.json` is the honest source, and it is a number Osama already
  * reads for the Library.
  */
+/**
+ * The architectures the managed mlx-lm implements, read from its own package.
+ *
+ * mlx-lm ships one module per architecture, so the module names *are* the list of
+ * things it can build. Reading them from the installed runtime means this cannot
+ * drift from the version actually in use, and it costs one directory listing
+ * (cached). `null` means "could not tell" — a missing interpreter must not be
+ * reported as "unsupported".
+ */
+let archCache: { at: number; names: Set<string> | null } | null = null;
+export function mlxArchitectures(): Set<string> | null {
+  if (archCache && Date.now() - archCache.at < 10 * 60_000) return archCache.names;
+  let names: Set<string> | null = null;
+  const python = mlxPaths().python;
+  if (python) {
+    try {
+      // <venv>/bin/python → <venv>/lib/python3.x/site-packages/mlx_lm/models
+      const site = path.join(path.dirname(path.dirname(python)), "lib");
+      const libs = fs.existsSync(site) ? fs.readdirSync(site) : [];
+      const pyDir = libs.find((d) => /^python3\.\d+$/.test(d));
+      if (pyDir) {
+        const models = path.join(site, pyDir, "site-packages", "mlx_lm", "models");
+        if (fs.existsSync(models)) {
+          names = new Set(
+            fs.readdirSync(models)
+              .filter((f) => f.endsWith(".py") && !f.startsWith("_"))
+              .map((f) => f.replace(/\.py$/, "").toLowerCase()),
+          );
+        }
+      }
+    } catch {
+      names = null;
+    }
+  }
+  archCache = { at: Date.now(), names };
+  return names;
+}
+
+/**
+ * The context window for a model *id* an MLX server reports on `/v1/models`.
+ *
+ * This is what makes the meter honest for an mlx-lm server Osama did not start:
+ * the id is the path (or the directory name) the server was given, and the model's
+ * own config.json carries the window.
+ */
+export function mlxWindowForModelId(id: string): number | undefined {
+  const dir = resolveMlxModelId(id);
+  if (!dir) return undefined;
+  try {
+    return describeMlxModel(dir).contextLength;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve what a server calls its model to a directory on disk. */
+export function resolveMlxModelId(id: string): string | undefined {
+  const clean = (id ?? "").trim().replace(/\/+$/, "");
+  if (!clean) return undefined;
+  const candidates = [
+    clean,
+    path.join(paths().models, clean),
+    path.join(paths().models, clean.replace(/\//g, "__")),
+    path.join(paths().models, path.basename(clean)),
+  ];
+  for (const c of candidates) {
+    if (c && fs.existsSync(c) && isMlxModelDir(c)) return c;
+  }
+  // A server started outside Osama may have been given a relative path or a bare
+  // directory name; match it against what is actually in the models directory so
+  // the window is still read from the model's own config.
+  try {
+    const hit = fs
+      .readdirSync(paths().models)
+      .map((d) => path.join(paths().models, d))
+      .find((d) => isMlxModelDir(d) && (path.basename(d) === path.basename(clean) || path.basename(d).endsWith(path.basename(clean))));
+    if (hit) return hit;
+  } catch {
+    /* no models dir yet */
+  }
+  return undefined;
+}
+
 export function mlxWindowFor(baseUrl: string): number | undefined {
   const { engineKindForServer, servedModelForServer } = mlxProcessHelpers;
   if (engineKindForServer(baseUrl) !== "mlx") return undefined;
@@ -709,6 +815,8 @@ function hfAuth(): Record<string, string> {
 
 export interface MlxSearchHit {
   ref: string;
+  /** what Hugging Face thinks this repo is for — text-generation is servable */
+  pipelineTag?: string;
   name: string;
   author?: string;
   downloads?: number;
@@ -739,6 +847,10 @@ export async function searchMlxModels(
   const limit = Math.max(1, Math.min(60, opts.limit ?? 24));
   const params = new URLSearchParams({
     filter: "mlx",
+    // `filter=mlx` alone is too broad: it includes ASR, TTS and vision conversions
+    // that mlx-lm cannot load, and offering them means a download that fails at
+    // serve time. mlx-lm serves text-generation models, so ask for those.
+    pipeline_tag: "text-generation",
     sort: "downloads",
     direction: "-1",
     limit: String(limit),
@@ -763,6 +875,7 @@ export async function searchMlxModels(
       likes: r.likes,
       updatedAt: r.lastModified ?? r.createdAt,
       tags: (r.tags ?? []).filter((t: string) => !["transformers", "safetensors"].includes(t)).slice(0, 6),
+      pipelineTag: r.pipeline_tag,
       url: `https://huggingface.co/${ref}`,
       source,
     };
@@ -793,6 +906,12 @@ export interface MlxRepoPlan {
   quantization?: MlxQuantization;
   contextLength?: number;
   architecture?: string;
+  /** Hugging Face's pipeline tag — text-generation and nothing else is servable here */
+  pipelineTag?: string;
+  /** false when this is not a model mlx-lm can load (ASR, vision, a bare base repo) */
+  servable: boolean;
+  /** why it is not servable, when that is the case */
+  warning?: string;
   /** files that would be skipped, with the reason */
   skipped: Array<{ path: string; reason: string }>;
 }
@@ -876,6 +995,11 @@ export async function planMlxRepo(input: string, opts: { source?: MlxSourceId } 
     /* the plan is still valid without these */
   }
 
+  const pipelineTag: string | undefined = info.pipeline_tag;
+  const servable = !pipelineTag || pipelineTag === "text-generation";
+  const warning = servable
+    ? undefined
+    : `${ref} is a ${pipelineTag} repo, not a text-generation model — mlx-lm will fail to load it. Downloads still work; serving it will not.`;
   return {
     ref,
     url: `https://huggingface.co/${ref}`,
@@ -887,6 +1011,9 @@ export async function planMlxRepo(input: string, opts: { source?: MlxSourceId } 
     quantization: quant,
     contextLength,
     architecture,
+    pipelineTag,
+    servable,
+    warning,
     skipped,
   };
 }
@@ -982,13 +1109,73 @@ export function mlxModelInUse(dir: string): boolean {
  * (so a path the user merely pointed at is never touched), and no running server
  * may be reading it.
  */
-export function removeMlxModel(dir: string): { removed: string } {
+export async function removeMlxModel(dir: string, opts: { force?: boolean } = {}): Promise<{ removed: string; stopped?: string[] }> {
   const target = path.resolve(dir);
   const root = path.join(paths().models) + path.sep;
   if (!isMlxModelDir(target)) throw new Error(`${target} is not an MLX model directory`);
   if (!target.startsWith(root)) throw new Error(`${target} is outside ${paths().models} — Osama will not delete a directory it does not manage`);
-  if (mlxModelInUse(target)) throw new Error(`${target} is being served right now — stop the MLX server first`);
+
+  // `force` is the escape hatch for the case that matters: a model that is stuck
+  // loading, which holds its directory open and would otherwise be undeletable.
+  let stopped: string[] = [];
+  const holders = liveMlxServersFor(target);
+  if (holders.length) {
+    if (!opts.force) {
+      throw new Error(`${target} is being served right now — stop the MLX server first, or delete with force`);
+    }
+    // Stop first, then delete: a server reading weights that vanish mid-load is a
+    // crash to explain later, and `stopProcess` escalates to SIGKILL when a
+    // process will not take SIGTERM.
+    for (const holder of holders) {
+      try {
+        await stopProcess(holder.id);
+        stopped.push(holder.id);
+      } catch (err) {
+        log.warn(`could not stop ${holder.id} before deleting ${target}: ${(err as Error).message}`);
+      }
+    }
+  }
   fs.rmSync(target, { recursive: true, force: true });
-  log.info(`removed MLX model ${target}`);
-  return { removed: target };
+  log.info(`removed MLX model ${target}${stopped.length ? ` (stopped ${stopped.join(", ")})` : ""}`);
+  return { removed: target, ...(stopped.length ? { stopped } : {}) };
+}
+
+/** The live MLX servers reading a given model directory. */
+function liveMlxServersFor(dir: string): ManagedProcessInfo[] {
+  const target = path.resolve(dir);
+  return listProcesses().filter((p) => {
+    if (p.status !== "running" && p.status !== "starting") return false;
+    if (!/mlx_lm/.test(`${p.tool} ${p.argv.join(" ")}`)) return false;
+    const i = p.argv.indexOf("--model");
+    if (i < 0) return false;
+    const value = p.argv[i + 1] ?? "";
+    return path.resolve(path.isAbsolute(value) ? value : path.join(p.cwd ?? ".", value)) === target;
+  });
+}
+
+/**
+ * A failed MLX load, turned into the sentence that explains it.
+ *
+ * mlx-lm's failures arrive as a Python traceback; the last lines say what
+ * happened but not what to do about it. These are the ones worth naming, because
+ * each has a different fix and a user staring at a stuck spinner has neither.
+ */
+export function mlxFailureHint(lines: string[]): string | null {
+  const text = lines.slice(-40).join("\n");
+  if (/not supported|unsupported model|No module named .mlx_lm\.models/.test(text)) {
+    return "mlx-lm has no implementation for this architecture — check the model's config.json architecture, or pick another conversion.";
+  }
+  if (/automatic-speech-recognition|parakeet|whisper/i.test(text)) {
+    return "This looks like a speech model, not a text-generation one: mlx-lm serves LLMs only.";
+  }
+  if (/Failed to load|Unable to load|safetensors.*(invalid|error)|Error while deserializing/i.test(text)) {
+    return "The weights could not be read — the download may be incomplete. Delete the model and fetch it again.";
+  }
+  if (/out of memory|OutOfMemory|not enough memory|failed to allocate/i.test(text)) {
+    return "Ran out of memory loading this model — try a smaller quantisation, or close other models first.";
+  }
+  if (/ConnectionError|HTTPError|Repository Not Found|401|403|gated/i.test(text)) {
+    return "mlx-lm could not fetch something it needs (a gated licence, or a file that is not on disk) — set HF_TOKEN or fetch the repo again.";
+  }
+  return null;
 }

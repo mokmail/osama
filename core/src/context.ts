@@ -62,6 +62,62 @@ export function estimateTokens(text: string): number {
  * so its token counts fall back to the estimate while its window is read from
  * `/api/show`. `opts.model` names the Ollama model to inspect for the window.
  */
+/**
+ * What an endpoint can actually answer, remembered per URL.
+ *
+ * This exists because of a real report: Osama pointed at an mlx-lm server kept
+ * POSTing `/tokenize` and `/apply-template` — llama.cpp routes mlx-lm does not
+ * have — on every poll, forever, because nothing recorded the 404. Probing once
+ * and remembering the "no" (as well as the "yes") is the difference between a
+ * meter that measures and a meter that hammers.
+ */
+interface EndpointCaps {
+  /** the server renders templates and tokenizes for us (llama.cpp) */
+  tokenize: boolean;
+  template: boolean;
+  engine: "llamacpp" | "mlx" | "ollama" | "unknown";
+  at: number;
+}
+const CAPS = new Map<string, EndpointCaps>();
+const CAPS_TTL = 5 * 60_000;
+
+async function detectCaps(root: string, isOllama: boolean): Promise<EndpointCaps> {
+  const cached = CAPS.get(root);
+  if (cached && Date.now() - cached.at < CAPS_TTL) return cached;
+  const caps: EndpointCaps = { tokenize: false, template: false, engine: isOllama ? "ollama" : "unknown", at: Date.now() };
+  // One tiny tokenize is the honest test for the thing we want to use.
+  if (!isOllama) {
+    try {
+      const r = await fetch(`${root}/tokenize`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ content: "x" }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (r.ok) {
+        caps.tokenize = true;
+        caps.template = true;
+        caps.engine = "llamacpp";
+      }
+    } catch {
+      /* unreachable for now — treat as a "no" and re-probe after the TTL */
+    }
+  }
+  if (caps.engine === "unknown") {
+    // `GET /v1/models` with an OpenAI-compatible `/health` and no tokenizer route
+    // is mlx-lm (docs/mlx-macos.md). Knowing this is what lets `window()` answer
+    // with the model's own config instead of a 4096 default.
+    try {
+      const r = await fetch(`${root}/v1/models`, { signal: AbortSignal.timeout(3000) });
+      if (r.ok) caps.engine = "mlx";
+    } catch {
+      /* leave it unknown */
+    }
+  }
+  CAPS.set(root, caps);
+  return caps;
+}
+
 export function createMeter(base: string, opts: { model?: string } = {}): Meter {
   const root = base.replace(/\/$/, "");
   const isOllama = ((): boolean => {
@@ -90,10 +146,14 @@ export function createMeter(base: string, opts: { model?: string } = {}): Meter 
   };
 
   const memo = new Map<string, number>();
+  /** A window we could not read: remembered briefly so we do not re-probe on every poll. */
+  let windowMiss = 0;
 
   return {
     async count(text: string): Promise<number> {
       if (!text) return 0;
+      const caps = await detectCaps(root, isOllama);
+      if (!caps.tokenize) return estimateTokens(text);
       const out = await post("/tokenize", { content: text });
       const tokens = out?.tokens;
       if (Array.isArray(tokens)) return tokens.length;
@@ -102,6 +162,18 @@ export function createMeter(base: string, opts: { model?: string } = {}): Meter 
 
     async countMessages(messages: ChatMessage[]): Promise<number> {
       if (!messages.length) return 0;
+      // A server without a tokenizer route has neither of these; estimating is the
+      // honest answer, and asking anyway would be a 404 per poll.
+      const caps = await detectCaps(root, isOllama);
+      if (!caps.template || !caps.tokenize) {
+        let total = 0;
+        for (const m of messages) {
+          total += 4;
+          total += estimateTokens(typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? ""));
+          if (Array.isArray(m.tool_calls)) total += estimateTokens(JSON.stringify(m.tool_calls));
+        }
+        return total;
+      }
       // Prefer rendering the real template, then tokenizing the result: that
       // captures per-message overhead a naive concatenation would miss.
       const rendered = await post("/apply-template", { messages });
@@ -148,13 +220,23 @@ export function createMeter(base: string, opts: { model?: string } = {}): Meter 
       } catch {
         /* fall through */
       }
-      // mlx-lm has no /props. If the server is one Osama started for an MLX model,
-      // the model's own config is the answer; otherwise 4096 remains the fallback.
-      const { mlxWindowFor } = await import("./mlx.js");
-      const mlx = mlxWindowFor(root);
-      if (mlx && mlx > 0) {
-        memo.set("window", mlx);
-        return mlx;
+      // mlx-lm has no /props. The model's own config.json is the answer — first for
+      // a server Osama started, then for any MLX server, identified by the model id
+      // it reports on /v1/models (which is why this works for one started by hand).
+      const { mlxWindowFor, mlxWindowForModelId, probeMlxServer } = await import("./mlx.js");
+      const own = mlxWindowFor(root);
+      if (own && own > 0) {
+        memo.set("window", own);
+        return own;
+      }
+      if (Date.now() > windowMiss) {
+        const info = await probeMlxServer(root);
+        const fromId = info.ok && info.model ? mlxWindowForModelId(info.model) : undefined;
+        if (fromId && fromId > 0) {
+          memo.set("window", fromId);
+          return fromId;
+        }
+        windowMiss = Date.now() + 60_000;
       }
       return 4096;
     },

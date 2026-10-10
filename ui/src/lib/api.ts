@@ -149,17 +149,36 @@ export const api = {
     ),
 
   /**
-   * Poll /health until llama-server answers, so callers can wait for a model to
+   * Poll /health until the server answers, so callers can wait for a model to
    * finish loading instead of showing a chat box that is not ready yet.
+   *
+   * It also watches the process behind that URL, and gives up the moment that
+   * process is gone. A load that *fails* used to cost the caller the whole
+   * timeout — three minutes of a spinner for a process that died in two seconds,
+   * with nothing to click. Waiting is only honest while something is still trying.
    */
-  waitForServer: async (baseUrl: string, timeoutMs = 120_000): Promise<boolean> => {
+  waitForServer: async (
+    baseUrl: string,
+    timeoutMs = 120_000,
+    opts: { shouldStop?: () => boolean } = {},
+  ): Promise<boolean> => {
     const deadline = Date.now() + timeoutMs;
+    const url = baseUrl.replace(/\/+$/, "");
     for (;;) {
+      if (opts.shouldStop?.()) return false;
       try {
         const h = await get<{ ok: boolean }>(`/api/server/health?baseUrl=${encodeURIComponent(baseUrl)}`);
         if (h.ok) return true;
       } catch {
-        /* keep waiting */
+        /* not answering yet */
+      }
+      // A process that is no longer running/starting will never answer.
+      try {
+        const { processes } = await get<{ processes: Array<{ url?: string; status: string }> }>("/api/processes");
+        const mine = processes.filter((p) => (p.url ?? "").replace(/\/+$/, "") === url);
+        if (mine.length > 0 && mine.every((p) => p.status !== "running" && p.status !== "starting")) return false;
+      } catch {
+        /* the engine may be busy; keep waiting on /health */
       }
       if (Date.now() >= deadline) return false;
       await new Promise((r) => setTimeout(r, 1000));
@@ -286,7 +305,7 @@ export const mlxApi = {
   repo: (ref: string, source?: string) =>
     get<{ plan: MlxRepoPlan }>(`/api/mlx/repo?ref=${encodeURIComponent(ref)}${source ? `&source=${encodeURIComponent(source)}` : ""}`),
   download: (ref: string, source?: string) => post<{ id: string }>("/api/mlx/download", { ref, source }),
-  remove: (dir: string) => post<{ ok: boolean; removed: string }>("/api/mlx/remove", { dir }),
+  remove: (dir: string, force = false) => post<{ ok: boolean; removed: string; stopped?: string[] }>("/api/mlx/remove", { dir, force }),
 };
 
 export const agentApi = {

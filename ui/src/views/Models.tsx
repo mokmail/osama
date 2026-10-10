@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { Boxes, Download as DownloadIc, FolderOpen, FolderPlus, HardDrive, MessagesSquare, RefreshCw, Search as SearchIcon, Server as ServerIcon, Sparkles, Square, Trash2 } from "lucide-react";
 import { api, mlxApi } from "../lib/api";
 import type { LocalModel, ManagedProcess } from "../lib/types";
@@ -43,6 +43,8 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
   const [importPath, setImportPath] = useState("");
   const [picking, setPicking] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
+  /** Mirrors `loading` for the ticking effect above (which must not restart on it). */
+  const loadingRef = useRef(false);
   // MLX is a second engine with its own model shape (a directory, not a GGUF),
   // so it is loaded alongside the library rather than inside it.
   const [mlxModels, setMlxModels] = useState<MlxModel[]>([]);
@@ -88,11 +90,37 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
     }
   }
 
+  // A load that never finishes must not look like a load that is working: tick
+  // while one is in flight so the view can say how long, and offer the way out.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!loadingRef.current) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [loadingRef.current]);
+
+  /** The last MLX failure we told the user about, so it is said once. */
+  const lastMlxError = useRef<string | null>(null);
+  useEffect(() => {
+    const last = bus.events.filter((e) => e.type === "mlx").slice(-1)[0];
+    const msg = last?.data?.stage === "error" ? String(last.data.error ?? "") : "";
+    if (msg && msg !== lastMlxError.current) {
+      lastMlxError.current = msg;
+      toast.push("err", msg.slice(0, 240));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bus.events.length]);
+
   const servers = procs.filter((p) => isModelServer(p) && (p.status === "running" || p.status === "starting"));
   const runningServer = servers.find((p) => p.status === "running");
   const healthReady = useServerReady(runningServer?.url);
   const loading = !!runningServer && !healthReady;
   const busy = pending !== null || loading;
+  loadingRef.current = loading;
+  const loadingSecs = runningServer ? Math.max(0, Math.round((now - runningServer.startedAt) / 1000)) : 0;
+  /** Long enough that a working load would have answered /health by now. */
+  const loadStuck = loading && loadingSecs > 120;
+  const stopBusy = pending === "__stop__";
   const failure = useLoadFailure(procs);
   const [dismissedFailure, setDismissedFailure] = useState<number | null>(null);
   const showFailure = !!failure && !loading && dismissedFailure !== failure.since;
@@ -188,14 +216,29 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
     }
   }
 
-  async function removeMlx(m: MlxModel) {
-    if (!window.confirm(`Delete ${m.name} from ${m.dir}? The files are removed from disk.`)) return;
+  /**
+   * Delete a downloaded model.
+   *
+   * A model that is loading (or stuck loading) holds its own directory, so the
+   * first attempt is refused and the second one — with `force` — stops the server
+   * and then deletes. Refusing silently would leave exactly the state this is
+   * meant to fix: a model you cannot get rid of.
+   */
+  async function removeMlx(m: MlxModel, force = false) {
+    if (!force && !window.confirm(`Delete ${m.name} from ${m.dir}? The files are removed from disk.`)) return;
     try {
-      await mlxApi.remove(m.dir);
-      toast.push("ok", `Removed ${m.name}.`);
+      const r = await mlxApi.remove(m.dir, force);
+      toast.push("ok", `${r.stopped?.length ? "Stopped the server · " : ""}Removed ${m.name}.`);
       load();
     } catch (e) {
-      toast.push("err", (e as Error).message);
+      const msg = (e as Error).message;
+      if (!force && /being served|stop the MLX server/i.test(msg)) {
+        if (window.confirm(`${m.name} is being served or is still loading.\n\nStop it and delete the files anyway?`)) {
+          await removeMlx(m, true);
+          return;
+        }
+      }
+      toast.push("err", msg);
     }
   }
 
@@ -207,18 +250,28 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
    * default is taken, and the returned process tells us the real URL.
    */
   async function mlxChatWith(m: MlxModel) {
-    setPending(`mlx:${m.dir}`);
     try {
       const r = await mlxApi.serve({ model: m.dir, host: SERVER_DEFAULTS.host, port: SERVER_DEFAULTS.port });
       const url = r.process.url ?? `http://${SERVER_DEFAULTS.host}:8082`;
       toast.push("info", `${r.stopped?.length ? "Replaced the running server · " : ""}Loading ${m.name} with MLX…`);
-      // mlx-lm loads weights before it binds, so wait for the real thing.
-      const ready = await api.waitForServer(url, 180_000);
-      toast.push(ready ? "ok" : "warn", ready ? `Serving ${m.name} on ${url} (MLX)` : `${m.name} is still loading — give it a moment.`);
-      load();
-      onNavigate("chat");
+      // Watch in the background, releasing the UI first: the card's own loading
+      // state (timed, with a Stop) is what the user watches, and holding `pending`
+      // across the whole load is what left the view inert for minutes. A load that
+      // dies now returns in seconds rather than at the timeout.
+      void (async () => {
+        const ready = await api.waitForServer(url, 180_000);
+        if (ready) {
+          toast.push("ok", `Serving ${m.name} on ${url} (MLX)`);
+          load();
+          onNavigate("chat");
+        } else {
+          toast.push("warn", `${m.name} did not finish loading — the Library shows what the runtime said.`);
+          load();
+        }
+      })();
     } catch (e) {
       toast.push("err", `Could not start MLX: ${(e as Error).message}`);
+      return;
     } finally {
       setPending(null);
     }
@@ -261,14 +314,23 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
       const replaced = (r.stopped?.length ?? 0) > 0;
       const url = r.process.url ?? `http://${SERVER_DEFAULTS.host}:${SERVER_DEFAULTS.port}`;
       toast.push("info", `${replaced ? "Replaced the running server · " : ""}Loading ${m.name}…`);
-      // Wait for the model to actually finish loading before showing Chat —
-      // a 30B takes a while and a premature chat box looks broken.
-      const ready = await api.waitForServer(url);
-      toast.push(ready ? "ok" : "warn", ready ? `Serving ${m.name} on ${url}` : `${m.name} is still loading — give it a moment.`);
-      load();
-      onNavigate("chat");
+      // Wait for the model to finish loading before showing Chat — a 30B takes a
+      // while and a premature chat box looks broken — but do it in the background
+      // so the view is never left waiting on it (and stop early if the load dies).
+      void (async () => {
+        const ready = await api.waitForServer(url);
+        if (ready) {
+          toast.push("ok", `Serving ${m.name} on ${url}`);
+          load();
+          onNavigate("chat");
+        } else {
+          toast.push("warn", `${m.name} did not finish loading — see the note above the library.`);
+          load();
+        }
+      })();
     } catch (e) {
       toast.push("err", `Could not start the server: ${(e as Error).message}`);
+      return;
     } finally {
       setPending(null);
     }
@@ -358,15 +420,33 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
             </div>
           )}
 
-          {runningServer && (
-            <div className="row wrap" style={{ gap: 10, marginBottom: 14 }}>
-              <Badge kind="ok"><span className="dot" /> serving</Badge>
-              <span className="mono small">{serving?.name ?? "another model"}</span>
-              <span className="faint small">on {runningServer.url ?? "—"} · starting another model replaces it</span>
+          {(runningServer || loading || servers.length > 0) && (
+            <div className="row wrap" style={{ gap: 10, marginBottom: 14, alignItems: "center" }}>
+              {loading ? (
+                <Badge kind="info"><span className="dot" /> loading… {Math.floor(loadingSecs / 60)}m {String(loadingSecs % 60).padStart(2, "0")}s</Badge>
+              ) : (
+                <Badge kind="ok"><span className="dot" /> serving</Badge>
+              )}
+              <span className="mono small">{serving?.name ?? mlxServing?.name ?? runningServer?.label.split(" · ").pop() ?? "another model"}</span>
+              <span className="faint small">on {runningServer?.url ?? "—"} · starting another model replaces it</span>
               <div className="spacer" style={{ flex: 1 }} />
-              <Button size="sm" variant="danger" onClick={stopServer} disabled={busy}>
-                {busy ? <Spinner /> : <Square size={13} />} Stop server
+              {/* Never disabled while loading: this is what gets a stuck load out. */}
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={stopServer}
+                disabled={stopBusy}
+                title="Sends SIGTERM, then SIGKILL if the process will not go"
+              >
+                {stopBusy ? <Spinner /> : <Square size={13} />} {loadStuck ? "Force stop" : "Stop server"}
               </Button>
+            </div>
+          )}
+
+          {loadStuck && (
+            <div className="help" style={{ color: "var(--warn)", marginBottom: 12 }}>
+              Still loading after {Math.floor(loadingSecs / 60)}m {String(loadingSecs % 60).padStart(2, "0")}s — this model is
+              probably not going to load. Stop frees the port and the memory, and the model can be deleted afterwards.
             </div>
           )}
 
@@ -497,6 +577,7 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
                   <div key={m.dir} className={`tile ${mlxServing?.dir === m.dir ? "active" : ""}`} title={m.dir}>
                     <div className="title" title={m.name}>{m.name}</div>
                     <div className="sub">
+                      {m.servable === false && <Badge kind="warn">not servable</Badge>}
                       {m.quantization?.bits ? <Badge kind="accent">{m.quantization.bits}-bit{m.quantization.groupSize ? ` g${m.quantization.groupSize}` : ""}</Badge> : null}
                       {m.architecture && <Badge>{m.architecture}</Badge>}
                       {m.hasAdapter && <Badge kind="warn">adapter</Badge>}
@@ -510,14 +591,25 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
                       <Button
                         size="sm"
                         variant={mlxServing?.dir === m.dir ? "ghost" : "primary"}
-                        disabled={busy}
+                        disabled={busy || m.servable === false}
+                        title={m.servable === false ? m.servableNote : undefined}
                         onClick={() => mlxChatWith(m)}
                       >
                         {busy && pending === `mlx:${m.dir}` ? <Spinner /> : <MessagesSquare size={13} />}
                         {mlxServing?.dir === m.dir ? (loading ? "Loading…" : "Open chat") : "Serve with MLX"}
                       </Button>
+                      {mlxServing?.dir === m.dir && runningServer && (
+                        <Button size="sm" variant="danger" onClick={stopServer} disabled={stopBusy} title="Stop the MLX server">
+                          {stopBusy ? <Spinner /> : <Square size={13} />} Stop
+                        </Button>
+                      )}
                       {m.origin === "models-dir" && (
-                        <Button size="sm" variant="ghost" title="Delete this model's files from disk" onClick={() => void removeMlx(m)}>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          title="Delete this model's files from disk"
+                          onClick={() => void removeMlx(m)}
+                        >
                           <Trash2 size={13} />
                         </Button>
                       )}
@@ -592,6 +684,9 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
                       <Badge>{mlxPlan.files.length} files · {bytes(mlxPlan.totalBytes)}</Badge>
                       {mlxPlan.gated && <Badge kind="warn">gated</Badge>}
                     </div>
+                    {mlxPlan.warning && (
+                      <div className="help" style={{ color: "var(--warn)", marginTop: 8 }}>{mlxPlan.warning}</div>
+                    )}
                     <div className="row wrap" style={{ gap: 9, marginTop: 10, alignItems: "center" }}>
                       <Button size="sm" variant="primary" disabled={mlxFetching || mlxSearching} onClick={() => void fetchMlx(mlxPlan)}>
                         {mlxFetching ? <Spinner /> : <DownloadIc size={13} />} Fetch {bytes(mlxPlan.totalBytes)}

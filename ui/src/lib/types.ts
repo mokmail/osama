@@ -877,6 +877,10 @@ export interface MlxModel {
   origin: "models-dir" | "external";
   addedAt: string;
   hasAdapter?: boolean;
+  /** false when mlx-lm has no implementation for this architecture */
+  servable?: boolean;
+  /** the sentence to show when it does not */
+  servableNote?: string;
 }
 
 export interface MlxStatus {
@@ -904,6 +908,7 @@ export interface MlxSource {
 
 export interface MlxSearchHit {
   ref: string;
+  pipelineTag?: string;
   name: string;
   author?: string;
   downloads?: number;
@@ -932,5 +937,11 @@ export interface MlxRepoPlan {
   quantization?: MlxQuantization;
   contextLength?: number;
   architecture?: string;
+  /** Hugging Face's pipeline tag — only text-generation is servable by mlx-lm */
+  pipelineTag?: string;
+  /** false when mlx-lm cannot load it (ASR, vision, a bare base repo) */
+  servable: boolean;
+  /** the sentence to show when it is not servable */
+  warning?: string;
   skipped: Array<{ path: string; reason: string }>;
 }

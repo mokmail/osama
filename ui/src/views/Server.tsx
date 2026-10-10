@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Copy, Eye, EyeOff, Play, RefreshCw, Square } from "lucide-react";
+import { Eye, EyeOff, Play, RefreshCw, Square } from "lucide-react";
 import { api } from "../lib/api";
 import type { LocalModel, ManagedProcess, ToolSpec } from "../lib/types";
 import { Badge, Button, Card, CardHead, Console, Field, Spinner, StatusDot, usePoll, useToast } from "../components/ui";
@@ -190,9 +190,6 @@ export function ServerView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
               {busy ? <Spinner /> : <Play size={15} />} Start server
             </Button>
           )}
-          <Button variant="ghost" onClick={() => navigator.clipboard.writeText(`${baseUrl}/v1`)}>
-            <Copy size={14} /> Copy base URL
-          </Button>
         </div>
       </Card>
 

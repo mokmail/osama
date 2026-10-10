@@ -46,6 +46,7 @@
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --sidebar-w: 268px;
+  --sidebar-rail: 64px;
   /* the chat reading column — Open-WebUI-ish comfortable measure */
   --chat-col: 760px;
 }
@@ -1809,6 +1810,28 @@ kbd {
    above that width would offer a toggle for a sidebar that never hides. */
 .nav-toggle { display: none; }
 @media (max-width: 860px) { .nav-toggle { display: inline-grid; } }
+
+/* The desktop rail. Below 860px the sidebar is a drawer instead, so every rule
+   here is scoped to the widths where collapsing is a thing — a drawer always
+   shows its labels, however the desktop was left. */
+.nav-collapse { display: none; }
+@media (min-width: 861px) { .nav-collapse { display: inline-grid; } }
+
+@media (min-width: 861px) {
+  .app.collapsed { grid-template-columns: var(--sidebar-rail) 1fr; }
+  .app.collapsed .sidebar { padding-top: 6px; }
+  .app.collapsed .brand { justify-content: center; padding: 16px 0 20px; }
+  /* the mark stays, the wordmark does not fit in 64px */
+  .app.collapsed .brand > div { display: none; }
+  .app.collapsed .nav-group-label { display: none; }
+  /* with the labels gone, a hairline is what still separates the groups */
+  .app.collapsed .nav-group + .nav-group { border-top: 1px solid var(--border); margin-top: 8px; padding-top: 8px; }
+  .app.collapsed .nav-item { justify-content: center; padding: 11px 0; gap: 0; }
+  .app.collapsed .nav-label { display: none; }
+  .app.collapsed .nav-item svg { width: 16px; height: 16px; opacity: 0.85; }
+  /* the chat insights column is a reading panel, not a rail: it needs the width */
+  .app.collapsed #sidebar-insights-slot { display: none; }
+}
 
 .dirfolders { display: flex; flex-direction: column; gap: 1px; max-height: 22vh; overflow: auto; }
 .dirrow { display: flex; align-items: center; gap: 4px; border-radius: 5px; }

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity, Boxes, Cpu, Download, FileCog, FileCode2, Gauge, HardDrive, Layers, LayoutDashboard, Menu,
-  MessagesSquare, Plug, Server as ServerIcon, ShieldCheck, Terminal, Wrench,
+  MessagesSquare, PanelLeftClose, PanelLeftOpen, Plug, Server as ServerIcon, ShieldCheck, Terminal, Wrench,
 } from "lucide-react";
 import { api, subscribeEvents } from "./lib/api";
 import type { OsamaEvent, SystemResponse } from "./lib/types";
@@ -103,8 +103,18 @@ function Shell() {
   const [system, setSystem] = useState<SystemResponse | null>(null);
   const [events, setEvents] = useState<OsamaEvent[]>([]);
   const [navOpen, setNavOpen] = useState(false);
+  /**
+   * The desktop rail: the sidebar collapses to icons and the choice survives a
+   * reload. It is a desktop idea only — under 860px the sidebar is a drawer and
+   * always shows its labels (the rail rules are scoped to wider screens).
+   */
+  const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem("osama.nav") === "collapsed");
   const [insightSlot, setInsightSlot] = useState<HTMLElement | null>(null);
   const toast = useToast();
+
+  useEffect(() => {
+    localStorage.setItem("osama.nav", navCollapsed ? "collapsed" : "open");
+  }, [navCollapsed]);
 
   useEffect(() => {
     localStorage.setItem("osama.view", view);
@@ -146,7 +156,7 @@ function Shell() {
   const title = NAV.flatMap((g) => g.items).find((i) => i.id === view)?.label ?? "";
 
   return (
-    <div className="app">
+    <div className={`app ${navCollapsed ? "collapsed" : ""}`}>
       <aside className={`sidebar ${navOpen ? "open" : ""}`}>
         <div className="brand">
           <img className="brand-mark brand-logo" src="/logo.png" alt="" aria-hidden="true" />
@@ -156,7 +166,7 @@ function Shell() {
           </div>
         </div>
         {NAV.map((group) => (
-          <div key={group.group}>
+          <div className="nav-group" key={group.group}>
             <div className="nav-group-label">{group.group}</div>
             {group.items.map((item) => {
               const Icon = item.icon;
@@ -165,13 +175,14 @@ function Shell() {
                   key={item.id}
                   id={`nav-${item.id}`}
                   className={`nav-item ${view === item.id ? "active" : ""}`}
+                  title={item.label}
                   onClick={() => {
                     setView(item.id);
                     setNavOpen(false);
                   }}
                 >
                   <Icon />
-                  {item.label}
+                  <span className="nav-label">{item.label}</span>
                 </button>
               );
             })}
@@ -185,6 +196,17 @@ function Shell() {
         <header className="topbar">
           <button className="btn ghost icon nav-toggle" onClick={() => setNavOpen((v) => !v)} aria-label="Menu">
             <Menu size={17} />
+          </button>
+          {/* Collapse/expand belongs to the desktop layout; on a narrow screen the
+              sidebar is a drawer and the button above is the right control. */}
+          <button
+            className="btn ghost icon nav-collapse"
+            onClick={() => setNavCollapsed((v) => !v)}
+            aria-label={navCollapsed ? "Expand the sidebar" : "Collapse the sidebar"}
+            aria-expanded={!navCollapsed}
+            title={navCollapsed ? "Expand the sidebar" : "Collapse the sidebar"}
+          >
+            {navCollapsed ? <PanelLeftOpen size={17} /> : <PanelLeftClose size={17} />}
           </button>
           <h1>{title}</h1>
           <div className="spacer" />

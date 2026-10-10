@@ -1,27 +1,29 @@
-# Osama — a local llama.cpp studio
+# Osama — a local LLM studio: llama.cpp and MLX
 
 [![CI](https://github.com/mokmail/osama/actions/workflows/ci.yml/badge.svg)](https://github.com/mokmail/osama/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![telemetry](https://img.shields.io/badge/telemetry-none-brightgreen)
 
-Osama runs GGUF models with [llama.cpp](https://github.com/ggml-org/llama.cpp)
-entirely on your machine. It installs the official engine builds, pulls models
-from the Hugging Face hub, serves them over an OpenAI-compatible API, and chats
-with them — plus an **agent mode** that reads files, runs commands and works
-inside a workspace you choose, off by default and one click away.
+Osama runs your models entirely on your machine — **GGUF through llama.cpp, and on
+Apple silicon also MLX through `mlx-lm`**: two engines in one app. It installs the
+official llama.cpp builds, fetches models from the Hugging Face hub and four other
+sources, serves either kind over an OpenAI-compatible API, and chats with it — plus
+an **agent mode** that reads files, runs commands and works inside a workspace you
+choose, off by default and one click away.
 
-Nothing is reimplemented and nothing is simulated: Osama downloads the real
-release archives and executes the actual binaries, so every flag it shows is a
-flag that build accepts, and every number it reports came from a run.
+Nothing is reimplemented and nothing is simulated: Osama downloads the real release
+archives and executes the actual binaries, so every flag it shows is a flag that
+build accepts, and every number it reports came from a run.
 
 ---
 
 ## Why Osama
 
 Most local LLM apps are chat windows that happen to bundle an inference engine.
-Osama is the other half of that problem: a studio for **llama.cpp itself** — the
-engine, its sixteen tools, its models, its measurements — with a chat client and
-an agent built on top of exactly those binaries.
+Osama is the other half of that problem: a studio for the **engine itself** — its
+builds, its tools, its models, its measurements — with a chat client and an agent
+built on top of the real binaries. That engine is llama.cpp; on Apple silicon it is
+also MLX.
 
 ### You get upstream llama.cpp, and you choose it
 
@@ -30,6 +32,16 @@ executables. Pick the build, pick the backend — **CPU, Metal, CUDA, Vulkan,
 ROCm, SYCL, OpenVINO, OpenCL** — and every tool form is generated from that
 build's own `--help`, served live at `GET /api/tools`. When upstream lands a fix,
 you install it that day; you are not waiting for someone to ship a new runtime.
+
+### And on Apple silicon, a second engine: MLX
+
+LM Studio and Jan ship MLX; an app that only drives llama.cpp cannot. So Osama runs
+[MLX](https://github.com/ml-explore/mlx) too, through `mlx-lm` — as a **second
+engine**, not a second app. One Models page lists both kinds of model, the Chat
+header switches provider between `llama.cpp` and `MLX`, and chat and agent mode work
+over either. MLX models are directories of `safetensors` weights rather than single
+GGUF files, so they get their own card and their own catalogue — see
+[MLX models on Apple silicon](#mlx-models-on-apple-silicon).
 
 ### The whole toolchain, not just a chat box
 
@@ -73,6 +85,7 @@ repository — the tool list comes from `GET /api/tools`, the backends from
 | | Osama | LM Studio | Ollama | Jan | Open WebUI | llama.cpp CLI |
 |---|---|---|---|---|---|---|
 | Install & switch any upstream llama.cpp build, any backend | **yes** | in-app runtimes | bundled runtime | bundled (llama.cpp, MLX) | no engine | you build it |
+| Apple-silicon MLX models, served and chatted from the same app | **yes** — mlx-lm | yes | no | yes | no engine | no |
 | The full llama.cpp toolchain in a GUI | **yes** — 16 tools | no | no | no | no | tools only, no GUI |
 | Quantize with per-tensor types + an importance matrix | **yes** | no | FP16/FP32 presets | no | no | command line |
 | Model discovery, GGUF filtering, resumable downloads | **yes** — HF hub | own catalog | own registry | own catalog | no | no |
@@ -92,8 +105,10 @@ column is verifiable in this repo.
   polished chat experience, and that is a fine reason to use them.
 - **You only run one model from a terminal.** llama.cpp's own binaries are all you
   need; Osama is a GUI over exactly those binaries, nothing more magical.
-- **You want MLX on Apple silicon.** LM Studio and Jan ship MLX. Osama drives
-  llama.cpp — Metal on macOS — so if MLX numbers are the point, use those.
+- **You want MLX on anything but an Apple-silicon Mac.** MLX is Apple silicon
+  only; on CUDA or ROCm hardware llama.cpp is the engine that matters.
+- **You want the engines in separate apps.** LM Studio and Jan bundle both; Osama
+  puts them in one place, which is an advantage only if that is what you want.
 - **You want a shared, multi-user inference platform.** Osama is a studio for one
   machine, not a serving fleet.
 
@@ -104,11 +119,15 @@ column is verifiable in this repo.
 1. `./start.sh` — the app opens on <http://127.0.0.1:5178>, no model shipped.
 2. **llama.cpp** — install an engine build: the latest upstream release, for your
    OS, architecture and backend.
-3. **Discover** — search the Hugging Face hub, filter to GGUF repos, read the
-   split parts and sizes, download resumably.
-4. **Library** — what you have, with quantisation, parameter count and size.
+3. **Models** — one page for both halves: what you have, and **Discover** below it
+   (Hugging Face, ModelScope, CivitAI, Ollama, a direct URL) with resumable
+   downloads, split parts and sizes, and quantisations read from the file headers.
+4. **MLX, on Apple silicon** — one **Update** builds Apple's runtime in a private
+   environment, then the MLX catalogue fetches a conversion; it appears beside your
+   GGUF models, fetched whole or not at all.
 5. **Server** — start a server on the model you picked, with every flag
-   explained, then chat with it in **Chat**.
+   explained, then chat with it in **Chat** — switch the provider to MLX if that is
+   what you are serving.
 6. **Quantize / Evaluate** — squeeze the model down, or benchmark it and compare
    the numbers to the quant you were running before.
 7. **Agent** — point it at a project folder and ask for the change you actually
@@ -125,6 +144,7 @@ column is verifiable in this repo.
 - [Installation](#installation)
 - [Getting started](#getting-started)
 - [Using Osama](#using-osama)
+- [MLX models on Apple silicon](#mlx-models-on-apple-silicon)
 - [Chat mode and Agent mode](#chat-mode-and-agent-mode)
 - [The agent toolkit](#the-agent-toolkit)
 - [The agent's soul and memory](#the-agents-soul-and-memory)
@@ -230,13 +250,19 @@ accelerator that fits (`metal` on Apple Silicon, `cuda`/`vulkan`/`rocm`/`sycl`/
 `openvino`/`cpu` elsewhere). It downloads the archive, extracts it and
 discovers the binaries inside. Several builds can coexist; one is *active*.
 
-**2. Get a model** → the **Discover** page.
+**2. Get a model** → the **Models** page, in its Discover section.
 Search Hugging Face, ModelScope, CivitAI, Ollama or a direct URL, filter to
 GGUF, and download. Progress is byte-accurate and resumable — an interrupted
-download picks up where it stopped. Downloads land in the **Library**, where
+download picks up where it stopped. Downloads land in the library above, where
 each model gets a card read straight from its header (architecture, context
 length, quantisation, tokenizer, chat template) — no guesswork and no extra
 network call.
+
+**2b. Or an MLX model, on Apple silicon** → the **MLX** card on the same page.
+One **Update** builds the runtime (a few seconds, ~350 MB, in its own environment
+under `.osama/mlx/`), then search the MLX catalogue — or paste a repo id — and
+fetch the whole repo in one go. Support files land first and weights last; a model
+appears only once it is complete.
 
 **3. Serve it** → the **Server** page.
 Pick the model, set the parameters, start. Osama builds an argv array and
@@ -245,7 +271,8 @@ When it answers `/health`, the model is ready.
 
 **4. Chat** → the **Chat** page.
 Type. Chat mode is a plain chat app by default; flip to **Agent** in the header
-when you want a model that can touch files.
+when you want a model that can touch files. The provider switch in the header
+chooses which engine answers — `llama.cpp` or `MLX`.
 
 ### Or do all of it from the terminal
 
@@ -270,8 +297,7 @@ See [Headless CLI](#headless-cli) for the full command set.
 | **Start** | Dashboard | Live stats: agent harness (tools, skills, memory, jobs, MCP) beside the llama.cpp engine, library, machine and activity |
 | | Chat | Plain chat by default, with an explicit **Chat / Agent** switch and a sidebar for history, context and settings |
 | | Artifacts | Everything the agent wrote: files, their folders, and a jailed folder browser |
-| **Models** | Library | Local GGUF models — scan, add, remove, inspect cards |
-| | Discover | Search and trending across Hugging Face, ModelScope, CivitAI, Ollama, direct URL |
+| **Models** | Models | One page: the GGUF library, the **MLX** card (runtime, models, catalogue, fetch), then **Discover** — search and trending across Hugging Face, ModelScope, CivitAI, Ollama and direct URLs. A finished download adds itself to the library above |
 | **Run** | Server | Start/stop `llama-server` with full parameter control |
 | | Processes | Managed processes, live logs, lifecycle |
 | **Tools** | Run CLI | `llama-cli`, `llama-completion`, `llama-mtmd-cli`, `llama-tts` front-ends |
@@ -283,8 +309,9 @@ See [Headless CLI](#headless-cli) for the full command set.
 | **System** | llama.cpp | Engine builds: releases, install, activate, remove |
 | | MCP | Model Context Protocol servers — presets, connect, and the tools they expose |
 
-Every view is linkable: `#chat`, `#artifacts`, `#engine` … in the URL open that
-view directly, and reload returns you there.
+Every view is linkable: `#chat`, `#models`, `#engine` … in the URL open that view
+directly, and reload returns you there. The retired `#hub` route still opens the
+Models page, so older links keep working.
 
 ### The llama.cpp tools
 
@@ -341,6 +368,130 @@ one white "ink" accent for the single primary action, hairlines instead of
 shadows, small radii, monospace for anything copyable. Section labels are
 uppercase mono with wide tracking; numbers are light and large with tabular
 figures. Light mode follows the OS using the same tokens. No vendor branding.
+
+---
+
+## MLX models on Apple silicon
+
+llama.cpp is one engine, not the only one. On Apple silicon Osama also runs
+[MLX](https://github.com/ml-explore/mlx) — Apple's array framework — through
+`mlx-lm`, as a **second engine**: the same app, the same chat, the same agent, the
+same HTTP API, and the same one-server-at-a-time rule. The Chat header switches
+provider between `llama.cpp` and `MLX`, and both kinds of model live on one
+**Models** page.
+
+MLX models are *directories* of `safetensors` weights, not single GGUF files. That
+is a different kind of thing — no header to read, no quant type in a filename — so
+MLX gets its own card and its own catalogue instead of a row in the GGUF library.
+Nothing about it is simulated either: Osama runs the real `mlx_lm.server` and reads
+the real `config.json` of the model you picked.
+
+### The runtime is Osama's own, and that is the point
+
+**Update** on the MLX card builds a private environment under `.osama/mlx/venv` with
+[`uv`](https://docs.astral.sh/uv/) and installs the current `mlx-lm`: a few seconds,
+~350 MB, and nothing else on your machine is touched. `uv` has to be installed first
+(`brew install uv`); Osama says exactly that instead of failing obscurely.
+
+It is deliberately **not** your system `python3`. Before mlx-lm 0.32, `load()`
+lowercased the model path and compared it against the working directory — which kept
+its case — so every local path on macOS was refused with *"Local models must be
+relative to the current working dir"*, relative or absolute. Osama installs 0.32+,
+and when it finds an older mlx-lm on the machine it reports a **stale system
+interpreter** rather than handing you that error.
+
+### Where MLX models come from
+
+| Source | Searchable | What it is |
+|---|---|---|
+| **Hugging Face · mlx** | yes | every repo carrying the `mlx` library tag, by downloads — `mlx-community`, `lmstudio-community` and individual publishers together |
+| **mlx-community** | yes | the de-facto reference org for MLX conversions |
+| **lmstudio-community** | yes | LM Studio's own conversions, named `…-MLX-4bit` / `-8bit` |
+| **HF mirror** | no | the same files through `hf-mirror.com` for networks where `huggingface.co` is unreachable. It serves files and has no search API, so the source says *download only* instead of showing an empty result |
+| **Repo id or link** | no | paste `owner/repo` or a `huggingface.co` model link and fetch it directly |
+
+"More sources" here means a *different list*, not the same one re-sorted — which is
+why the two org catalogues are separate from the tag. The tag search also asks
+Hugging Face for `pipeline_tag=text-generation`, because `filter=mlx` alone returns
+speech, TTS and vision conversions too, and those are downloads that cannot be
+served.
+
+### A plan before a fetch
+
+Choosing a repo says what fetching it costs **before** anything is downloaded: the
+file list with weights and support files counted separately, total and weight bytes,
+bits and group size, architecture and context window from the repo's own
+`config.json`, and a **gated** badge when the licence needs accepting. Two small API
+calls — so a 27B repo is never mistaken for a small one, and a gated one is not a
+mystery failure ten seconds in.
+
+### Fetching is all-or-nothing, and resumable
+
+A multi-file model is unusable until it is whole, so Osama writes an
+`.osama-incomplete` marker into the directory when the fetch starts and removes it
+with the last byte. A marked directory is **never** listed as a model, offered to
+serve, or counted in the library. Support files (config, tokenizer, template) land
+first and the weights last, each file written atomically through the same resumable
+downloader the GGUF side uses, so an interrupted fetch picks up where it stopped.
+
+### "Not servable" is a real answer
+
+A conversion `mlx-lm` cannot build does not fail politely: it **starts a server**,
+binds its port, answers `GET /v1/models` with `200` and `GET /health` with `503`
+forever, and never loads a weight — 80 MB resident, indefinitely. From the outside
+that is a load that never finishes, with the model's directory held open.
+
+So Osama checks first and refuses with the reason:
+
+- `config.json` with **no `model_type`** — what a speech or vision conversion looks
+  like — is not a text model `mlx-lm` can load.
+- An architecture the installed runtime has **no module for** is named too. The list
+  is read from `mlx_lm/models/*.py` in your own environment, so it cannot drift from
+  the version you are actually running.
+- The refusal happens **before a port is bound**: `POST /api/mlx/serve` answers `409`
+  with the sentence (`force: true` to try anyway), and the UI shows the same model
+  greyed out in the picker, saying why.
+
+### Serving, and what the UI can honestly report
+
+Serving is exclusive, like llama.cpp's: starting a model stops the other server, so
+two engines never fight over the same memory. If the requested port is taken, Osama
+moves to a free neighbour instead of letting you guess why the bind failed.
+
+An MLX server is a different surface from `llama-server`, and the app does not
+pretend otherwise. `GET /v1/models` and `/health` are the whole story — there is no
+`/props`, so no slot count, no ftype and no server-reported context length. The
+context meter reads the window from the model's own `config.json` (including for an
+MLX server Osama did not start, identified by the model id it reports) and labels
+its token counts **estimated** rather than implying a tokenizer that does not exist.
+Tool calling is real — `tools` in, `tool_calls` out — so chat and agent mode work
+unchanged once the client can see the server.
+
+One plumbing detail worth stating: the UI sends `model: "local"` for any local
+server, which llama.cpp ignores. `mlx-lm` would resolve that as a Hugging Face repo
+id and fail with *"Repository Not Found for url: …/api/models/local"*. Osama replaces
+the placeholder with the weights the running server was actually started with, on
+both the chat proxy and the agent transport.
+
+### Deleting
+
+Removing an MLX model is the one destructive action here, so it is guarded three
+ways: it must be a real MLX model directory, strictly inside `.osama/models/` (a
+folder you merely pointed at is never touched), and not currently served. If it *is*
+being served — or is stuck loading — the refusal carries the way out: stop the server
+and delete, from the same dialog.
+
+### What MLX does not give you
+
+- **Inference, not conversion.** `mlx_lm.convert` (per-layer mixed precision) is not
+  exposed yet: Osama fetches and serves MLX models, it does not make them.
+- **Text models only.** `mlx-lm` serves text generation; speech and vision
+  conversions belong to `mlx-audio` and `mlx-vlm`, and the catalogue does not offer
+  them.
+- **No `/props`.** Fewer numbers than llama.cpp reports, and the app says so rather
+  than inventing them.
+- **Apple silicon only.** MLX needs a Metal-capable macOS; on any other machine the
+  card explains that and stays out of the way.
 
 ---
 
@@ -615,6 +766,7 @@ must already be in this server's own session log, so the caller cannot name
 | `OSAMA_AGENT_ROOTS` | workspace | Extra roots the file tools may read beyond it |
 | `OSAMA_SKILL_ROOTS` | — | Extra directories to discover skills from |
 | `OSAMA_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama endpoint, to read and pull its models |
+| `HF_TOKEN` | — | Optional. Sent as a bearer token for gated Hugging Face repos, by the GGUF hub and the MLX catalogue alike; without it a gated repo is reported as gated rather than as a mystery failure |
 | `OSAMA_BASE` | `http://127.0.0.1:5178` | Base URL used by the headless scripts |
 | `GITHUB_TOKEN` (or `GH_TOKEN`) | — | Optional. The engine list comes from GitHub's API, which allows 60 requests an hour unauthenticated; a token raises that to 5000. Osama caches the list for 10 minutes and shows the cached copy when the limit is spent, so a token is convenience, not a requirement |
 | `OSAMA_GITHUB_API` | the llama.cpp releases URL | Point release discovery at a mirror or proxy |
@@ -631,7 +783,8 @@ to inspect, reset or relocate:
 ```
 .osama/
 ├── bin/llama/       installed engine builds, one directory per build
-├── models/          downloaded GGUFs
+├── mlx/             Osama's own mlx-lm environment (Apple silicon)
+├── models/          downloaded GGUFs, and MLX model directories
 ├── downloads/       partial (.part) downloads, resumable
 ├── logs/            engine and process logs
 ├── sessions/        durable conversation logs (one JSON per session)
@@ -646,6 +799,10 @@ to inspect, reset or relocate:
 
 Deleting `.osama/` resets Osama completely. Nothing is written anywhere else
 except your chosen workspace.
+
+MLX keeps its runtime under `.osama/mlx/` instead of the engine registry, because
+it *is* a second engine: its builds come from PyPI rather than release archives, its
+models are directories rather than files, and its server answers a different API.
 
 ---
 
@@ -674,8 +831,8 @@ It is also exposed as `npm run osama -- <command>`.
 
 ## Engine API
 
-The engine (`npm start`, default `http://127.0.0.1:5178`) serves the UI and 106
-route registrations. The routes live in `server/src/routes/` — one module per
+The engine (`npm start`, default `http://127.0.0.1:5178`) serves the UI and just
+over a hundred route registrations — the exact count is logged at startup. The routes live in `server/src/routes/` — one module per
 area, wired in `routes/index.ts`; the server entry is a thin transport shell.
 
 ### Core
@@ -716,6 +873,19 @@ area, wired in `routes/index.ts`; the server entry is a thin transport shell.
 | `GET /api/ollama/status` · `/api/ollama/models` · `/api/ollama/show` | read a local Ollama install |
 | `GET /api/downloads` · `POST /api/downloads` · `POST /api/downloads/:id/cancel` | resumable GGUF downloads |
 
+### MLX (Apple silicon)
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/mlx/status` | support, runtime, paths and the MLX models on disk — one call for the card |
+| `POST /api/mlx/install` | build or update Osama's own `mlx-lm` environment (progress on `/api/events`) |
+| `GET /api/mlx/models` · `GET /api/mlx/model?dir=` | MLX model directories, and one model's facts |
+| `GET /api/mlx/sources` · `GET /api/mlx/search?q=&source=` | the catalogues, and a search over one of them |
+| `GET /api/mlx/repo?ref=` · `POST /api/mlx/download` | what fetching a repo costs, then fetch the whole repo (resumable) |
+| `POST /api/mlx/serve` | start `mlx_lm.server` on a model directory (exclusive; refuses what the runtime cannot load) |
+| `GET /api/mlx/info?baseUrl=` | what a running MLX server serves, from its own `/v1/models` |
+| `POST /api/mlx/remove` | delete a fetched model — guarded, with `force` to stop the server holding it first |
+
 ### Running
 
 | Endpoint | Purpose |
@@ -738,11 +908,11 @@ area, wired in `routes/index.ts`; the server entry is a thin transport shell.
 | `POST /api/agent/approve/:id` · `POST /api/agent/answer/:id` | resume a parked turn |
 | `POST /api/agent/compact` | compact the context on demand |
 | `GET /api/agent/tools` | the tool registry |
-| `GET|POST /api/agent/context` | exact context-window measurement via the model's own tokenizer |
+| `GET\|POST /api/agent/context` | exact context-window measurement via the model's own tokenizer |
 | `GET /api/agent/todos` · `/api/agent/artifacts` · `/api/agent/skills` | agent state the sidebar shows |
 | `GET /api/agent/artifacts/preview` · `/dir` · `POST …/open` · `POST …/reveal` | the Artifacts browser |
-| `GET|POST /api/agent/soul` · `POST /api/agent/soul/reset` | the identity |
-| `GET|POST /api/agent/prompt` | the assembled prompt, section by section |
+| `GET\|POST /api/agent/soul` · `POST /api/agent/soul/reset` | the identity |
+| `GET\|POST /api/agent/prompt` | the assembled prompt, section by section |
 | `GET /api/agent/memory` · `POST …/save` · `/batch` · `/replace` · `/forget` | memory |
 
 ### State, skills, scheduler, MCP
@@ -753,8 +923,8 @@ area, wired in `routes/index.ts`; the server entry is a thin transport shell.
 | `GET /api/workspaces` · `POST /api/workspaces` | the folder the agent works inside |
 | `GET /api/workspace/files` · `/file` · `/snapshot` | workspace contents |
 | `GET /api/skills/store` · `POST /api/skills/install` · `POST /api/skills/remove` | skills |
-| `GET|POST /api/scheduler/config` · `GET|POST /api/scheduler/jobs` | recurring jobs |
-| `PATCH|DELETE /api/scheduler/jobs/:id` · `POST …/run` · `GET …/history` | one job |
+| `GET\|POST /api/scheduler/config` · `GET\|POST /api/scheduler/jobs` | recurring jobs |
+| `PATCH\|DELETE /api/scheduler/jobs/:id` · `POST …/run` · `GET …/history` | one job |
 | `GET /api/mcp/presets` · `/api/mcp/servers` · `/api/mcp/tools` | MCP servers and their tools |
 | `POST /api/mcp/servers` · `POST /api/mcp/servers/:id/connect` · `/disconnect` · `POST /api/mcp/connect-all` | MCP lifecycle |
 | `DELETE /api/mcp/servers/:id` | remove |
@@ -865,10 +1035,18 @@ principles and the verified end-to-end run.
   view of what it is doing.
 - **Agentic state** — soul, two-store bounded memory, skills, todos, durable
   sessions, scheduled jobs, MCP servers, subagents.
+- **MLX on Apple silicon** — a second engine rather than a second app: a private
+  `mlx-lm` runtime, an MLX catalogue with real sources, whole-repo fetching that
+  never lists a half-download, and a refusal with a reason for anything the runtime
+  cannot load.
 - **Desktop shell** — Tauri 2 configuration for macOS, Linux and Windows.
 
 ### Next
 
+- **MLX conversion and quantisation.** `mlx-lm` ships `convert` with per-layer mixed
+  precision. Osama fetches and serves MLX models but does not yet make them;
+  exposing `mlx_lm.convert` behind the same process/result card the other tools use
+  is the obvious next step.
 - **A model on first run.** Osama ships no weights and makes you find them.
   A guided first-run that offers a small recommended model for your hardware
   would close the biggest gap between "installed" and "answering".

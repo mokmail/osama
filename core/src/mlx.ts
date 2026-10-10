@@ -800,7 +800,7 @@ export const MLX_SOURCES: MlxSource[] = [
   {
     id: "mlx-community",
     label: "mlx-community",
-    note: "the reference MLX conversions, published by Apple's community org",
+    note: "the de-facto reference org for MLX conversions",
     searchable: true,
   },
   {

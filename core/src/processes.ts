@@ -34,6 +34,25 @@ interface Managed extends ManagedProcessInfo {
 const RUNNING = new Map<string, Managed>();
 const MAX_BUFFER = 4000;
 
+/**
+ * The environment for a child process.
+ *
+ * A key set to `undefined` in `extra` means **unset**, not "the string
+ * undefined" — spreading cannot remove an inherited variable, and some variables
+ * must be removed. `PYTHONPATH`/`PYTHONHOME` are the case that matters: they are
+ * inherited by every process the app spawns, so a Python-based launcher can
+ * shadow an interpreter's own packages (seen as mlx-lm failing to import numpy
+ * from a venv that has it).
+ */
+export function childEnv(extra?: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const [key, value] of Object.entries(extra ?? {})) {
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  return env;
+}
+
 export interface StartOptions {
   label: string;
   tool: string;
@@ -69,7 +88,7 @@ export function startProcess(opts: StartOptions): ManagedProcessInfo {
     fd = fs.openSync(logPath, "a");
     child = spawn(opts.tool, opts.argv, {
       cwd: managed.cwd,
-      env: { ...process.env, ...(opts.env ?? {}) },
+      env: childEnv(opts.env),
       stdio: ["ignore", "pipe", "pipe"],
     });
     managed.child = child;
@@ -321,7 +340,7 @@ export function runToCompletion(
 ): Promise<RunResult> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
-    const child = spawn(tool, argv, { cwd: opts.cwd ?? process.cwd(), env: { ...process.env, ...(opts.env ?? {}) } });
+    const child = spawn(tool, argv, { cwd: opts.cwd ?? process.cwd(), env: childEnv(opts.env) });
     let stdout = "";
     let stderr = "";
     const pump = (stream: NodeJS.ReadableStream | null, sink: (s: string) => void) => {

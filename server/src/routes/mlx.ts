@@ -104,8 +104,10 @@ export const mlxRoutes: RouteModule = (deps) => [
       label: `MLX server · ${model.split("/").pop()}`,
       tool: cmd.tool,
       argv: cmd.argv,
-      // mlx-lm requires the model to live under the process cwd (see mlx.ts)
+      // mlx-lm requires the model to live under the process cwd (see mlx.ts),
+      // and the interpreter must not inherit the launcher's PYTHONPATH
       cwd: cmd.cwd,
+      env: core.mlxProcessEnv(),
       url: `http://${host}:${port}`,
     });
     core.onProcessLine(info.id, (line) => deps.broadcast("process", { id: info.id, line }));

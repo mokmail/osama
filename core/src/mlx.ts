@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { childEnv } from "./processes.js";
 import { paths, osamaHome } from "./paths.js";
 
 const log = logger("mlx");
@@ -71,6 +72,19 @@ export function mlxPaths() {
     /** the console script mlx-lm installs — preferred: it is not `python -m` */
     server: path.join(bin, "mlx_lm.server"),
   };
+}
+
+/**
+ * Variables that must not reach a Python Osama spawns.
+ *
+ * They are how a *launcher's* Python environment leaks into the interpreter we
+ * chose: with `PYTHONPATH` set by an agent runtime, the venv's own numpy is
+ * shadowed and mlx-lm imports fail with "No module named
+ * 'numpy._core._multiarray_umath'" — from a numpy that was never the venv's.
+ * Osama's interpreters are ours; these are the four that decide that.
+ */
+export function mlxProcessEnv(): NodeJS.ProcessEnv {
+  return { PYTHONHOME: undefined, PYTHONPATH: undefined, PYTHONSTARTUP: undefined, PYTHONEXECUTABLE: undefined };
 }
 
 /* ------------------------------------------------------------------ runtime */
@@ -168,7 +182,7 @@ function probePython(python: string, timeoutMs = 15000): Promise<Probe> {
       child = spawn(
         python,
         ["-c", "import mlx.core as mx, mlx_lm; print(mlx_lm.__version__); print(getattr(mx, '__version__', '?'))"],
-        { stdio: ["ignore", "pipe", "pipe"] },
+        { stdio: ["ignore", "pipe", "pipe"], env: childEnv(mlxProcessEnv()) },
       );
     } catch {
       return finish(false);
@@ -273,7 +287,7 @@ export interface InstallEvent {
 
 function run(cmd: string, argv: string[], onLine: (l: string) => void): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn(cmd, argv, { env: { ...process.env, PIP_DISABLE_PIP_VERSION_CHECK: "1" } });
+    const child = spawn(cmd, argv, { env: childEnv({ ...mlxProcessEnv(), PIP_DISABLE_PIP_VERSION_CHECK: "1" }) });
     const pump = (buf: Buffer) => {
       for (const line of String(buf).split(/\r?\n/)) if (line.trim()) onLine(line.trim());
     };

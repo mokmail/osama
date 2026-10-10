@@ -7,6 +7,7 @@ import { ModelLoading, useServerReady, useLoadFailure, FailedLoad } from "../com
 import { bytes } from "../lib/format";
 import type { EventBus } from "../App";
 import type { ViewId } from "../App";
+import { isModelServer, servedModelPath } from "../lib/procs";
 
 export function ServerView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: ViewId) => void }) {
   const toast = useToast();
@@ -60,7 +61,7 @@ export function ServerView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [spec, model, host, port, ctx, gpuLayers, parallel, apiKey, jinja, metrics]);
 
-  const servers = procs.filter((p) => p.tool.includes("llama-server"));
+  const servers = procs.filter((p) => isModelServer(p));
   const running = servers.find((p) => p.status === "running");
   const healthReady = useServerReady(running?.url);
   const loading = !!running && !healthReady;

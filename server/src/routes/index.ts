@@ -4,6 +4,7 @@ import { eventRoutes } from "./events.js";
 import { hubRoutes } from "./hub.js";
 import { identityRoutes } from "./identity.js";
 import { mcpRoutes } from "./mcp.js";
+import { mlxRoutes } from "./mlx.js";
 import { modelRoutes } from "./models.js";
 import { ollamaRoutes } from "./ollama.js";
 import { skillRoutes } from "./skills.js";
@@ -24,6 +25,7 @@ export const MODULES: RouteModule[] = [
   modelRoutes,
   hubRoutes,
   ollamaRoutes,
+  mlxRoutes,
   mcpRoutes,
   agentRoutes,
   skillRoutes,

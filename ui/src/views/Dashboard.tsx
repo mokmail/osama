@@ -8,6 +8,7 @@ import { Badge, Button, Card, CardHead, Console, usePoll } from "../components/u
 import { bytes, compactTokens, num, rate, sinceNow, timeAgo, uptime } from "../lib/format";
 import type { EventBus } from "../App";
 import type { ViewId } from "../App";
+import { isModelServer } from "../lib/procs";
 
 const POLL_MS = 3000;
 
@@ -24,7 +25,7 @@ export function Dashboard({ system, bus, onNavigate }: { system: SystemResponse 
   // labels them apart instead of showing one ambiguous number.
   const [agent, setAgent] = useState<AgentStats | null>(null);
 
-  const serverProc = stats?.processes.runningNow.find((p) => p.tool.includes("llama-server"));
+  const serverProc = stats?.processes.runningNow.find((p) => isModelServer(p));
   const serverUrl = serverProc?.url;
   // The Dashboard shows which model is loaded, so "what is running" is never a
   // guess. Names come from the served path's basename.

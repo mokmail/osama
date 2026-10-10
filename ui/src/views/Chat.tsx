@@ -23,6 +23,7 @@ import {
 } from "../lib/chatStore";
 import type { EventBus } from "../App";
 import type { ViewId } from "../App";
+import { isModelServer, servedModelPath } from "../lib/procs";
 
 export interface Attachment {
   id: string;
@@ -317,7 +318,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     try {
       const r = await api.processes();
       setProcs(r.processes);
-      const s = r.processes.find((p) => p.tool.includes("llama-server") && p.status === "running");
+      const s = r.processes.find((p) => isModelServer(p) && p.status === "running");
       if (s?.url) setBaseUrl(s.url);
     } catch {
       /* ignore */
@@ -495,8 +496,8 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   // readiness comes from its own /health and the poll keeps running until then.
   // For the Ollama provider there is no managed process: readiness is simply
   // "the daemon answered and a model is selected".
-  const healthReady = useServerReady(procs.some((p) => p.tool.includes("llama-server")) ? baseUrl : undefined);
-  const serverProcess = procs.find((p) => p.tool.includes("llama-server") && p.status === "running");
+  const healthReady = useServerReady(procs.some((p) => isModelServer(p)) ? baseUrl : undefined);
+  const serverProcess = procs.find((p) => isModelServer(p) && p.status === "running");
   const ollamaReady = !!ollama?.reachable && !!ollamaModel;
   const loading = provider === "llamacpp" && !!serverProcess && !healthReady;
   // The provider's effective endpoint — what every request must be sent to.

@@ -1,4 +1,7 @@
 import type {
+  MlxModel,
+  MlxServedInfo,
+  MlxStatus,
   AgentEvent,
   AgentStats,
   AgentToolsResponse,
@@ -254,6 +257,22 @@ export function subscribeEvents(onEvent: (e: { type: string; data: any; ts: numb
 }
 
 /* ------------------------------------------------------------- agentic mode */
+
+/**
+ * MLX — the Apple-silicon engine beside llama.cpp (docs/mlx-macos.md).
+ *
+ * Separate from the llama.cpp engine calls on purpose: MLX has its own runtime,
+ * its own model shape (a directory, not a GGUF) and its own install path.
+ */
+export const mlxApi = {
+  status: () => get<MlxStatus>("/api/mlx/status"),
+  install: () => post<{ started: boolean }>("/api/mlx/install", {}),
+  models: () => get<{ models: MlxModel[] }>("/api/mlx/models"),
+  inspect: (dir: string) => get<{ model: MlxModel }>(`/api/mlx/model?dir=${encodeURIComponent(dir)}`),
+  serve: (body: Record<string, unknown>) =>
+    post<{ process: ManagedProcess; command: string; stopped?: string[]; runtime: { source: string; mlxLmVersion?: string } }>("/api/mlx/serve", body),
+  info: (baseUrl: string) => get<MlxServedInfo>(`/api/mlx/info?baseUrl=${encodeURIComponent(baseUrl)}`),
+};
 
 export const agentApi = {
   tools: () => get<AgentToolsResponse>("/api/agent/tools"),

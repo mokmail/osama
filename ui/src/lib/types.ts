@@ -836,3 +836,59 @@ export interface EditRunResult {
   line?: string;
   result?: RunResult;
 }
+
+/* ------------------------------------------------------------------- MLX --- */
+
+export interface MlxSupport {
+  supported: boolean;
+  platform: string;
+  arch: string;
+  reason?: string;
+  darwinMajor?: number;
+}
+
+export interface MlxRuntime {
+  ready: boolean;
+  source: "managed" | "system" | "none";
+  python?: string;
+  mode: "script" | "module";
+  mlxLmVersion?: string;
+  mlxVersion?: string;
+  uv?: string;
+  detail: string;
+}
+
+export interface MlxQuantization {
+  bits?: number;
+  groupSize?: number;
+}
+
+/** An MLX model is a directory, not a file: config.json + safetensors shards. */
+export interface MlxModel {
+  id: string;
+  name: string;
+  dir: string;
+  sizeBytes: number;
+  files: number;
+  architecture?: string;
+  quantization?: MlxQuantization;
+  contextLength?: number;
+  layers?: number;
+  origin: "models-dir" | "external";
+  addedAt: string;
+  hasAdapter?: boolean;
+}
+
+export interface MlxStatus {
+  support: MlxSupport;
+  runtime: MlxRuntime;
+  paths: { home: string; venv: string; bin: string; python: string; server: string };
+  models: number;
+}
+
+export interface MlxServedInfo {
+  ok: boolean;
+  model?: string;
+  models?: string[];
+  error?: string;
+}

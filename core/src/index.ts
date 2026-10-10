@@ -31,4 +31,5 @@ export * from "./orchestr.js";
 export * from "./jobs.js";
 export * from "./sources.js";
 export * from "./ollama.js";
+export * from "./mlx.js";
 export * from "./mcp.js";

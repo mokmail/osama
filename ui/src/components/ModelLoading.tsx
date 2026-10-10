@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import type { ManagedProcess } from "../lib/types";
 import { Badge, Button, Spinner } from "./ui";
 import { phaseLabel, phaseProgress, scanLines, errorLines, type LoadPhase } from "../lib/llamaLog";
+import { isModelServer } from "../lib/procs";
 
 /**
  * Track whether a llama-server is ready to serve. `core.startProcess` marks a
@@ -47,7 +48,7 @@ export function useServerReady(baseUrl?: string, intervalMs = 1200): boolean {
 export function useLoadFailure(procs: ManagedProcess[]): { proc: ManagedProcess; since: number } | null {
   return useMemo(() => {
     const failed = procs
-      .filter((p) => p.tool.includes("llama-server") && p.status === "failed")
+      .filter((p) => isModelServer(p) && p.status === "failed")
       .sort((a, b) => (b.endedAt ?? b.startedAt) - (a.endedAt ?? a.startedAt))[0];
     return failed ? { proc: failed, since: failed.endedAt ?? failed.startedAt } : null;
   }, [procs]);

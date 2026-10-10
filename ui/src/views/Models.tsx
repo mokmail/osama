@@ -1,13 +1,15 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { Boxes, FolderOpen, FolderPlus, HardDrive, MessagesSquare, RefreshCw, Server as ServerIcon, Square, Trash2 } from "lucide-react";
-import { api } from "../lib/api";
+import { Boxes, FolderOpen, FolderPlus, HardDrive, MessagesSquare, RefreshCw, Server as ServerIcon, Sparkles, Square, Trash2 } from "lucide-react";
+import { api, mlxApi } from "../lib/api";
 import type { LocalModel, ManagedProcess } from "../lib/types";
-import { Badge, Button, Card, CardHead, Empty, Field, Spinner, usePoll, useToast } from "../components/ui";
+import { Badge, Button, Card, CardHead, Console, Empty, Field, Spinner, usePoll, useToast } from "../components/ui";
 import { ModelLoading, useServerReady, useLoadFailure, FailedLoad } from "../components/ModelLoading";
 import { GgufPicker } from "../components/GgufPicker";
 import { bytes, fileBase, shortPath, timeAgo } from "../lib/format";
 import type { EventBus } from "../App";
 import type { ViewId } from "../App";
+import { isModelServer, servedModelPath } from "../lib/procs";
+import type { MlxModel, MlxStatus } from "../lib/types";
 
 /**
  * One llama-server at a time — starting a model replaces whatever is serving.
@@ -41,10 +43,16 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
   const [importPath, setImportPath] = useState("");
   const [picking, setPicking] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
+  // MLX is a second engine with its own model shape (a directory, not a GGUF),
+  // so it is loaded alongside the library rather than inside it.
+  const [mlxModels, setMlxModels] = useState<MlxModel[]>([]);
+  const [mlxStatus, setMlxStatus] = useState<MlxStatus | null>(null);
 
   const load = () => {
     api.models().then((r) => setModels(r.models)).catch(() => {});
     api.processes().then((r) => setProcs(r.processes)).catch(() => {});
+    mlxApi.status().then(setMlxStatus).catch(() => {});
+    mlxApi.models().then((r) => setMlxModels(r.models)).catch(() => {});
   };
   usePoll(load, 5000);
 
@@ -71,7 +79,7 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
     }
   }
 
-  const servers = procs.filter((p) => p.tool.includes("llama-server") && (p.status === "running" || p.status === "starting"));
+  const servers = procs.filter((p) => isModelServer(p) && (p.status === "running" || p.status === "starting"));
   const runningServer = servers.find((p) => p.status === "running");
   const healthReady = useServerReady(runningServer?.url);
   const loading = !!runningServer && !healthReady;
@@ -83,12 +91,64 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
   /** Which library entry the running server was started from (by file path). */
   const serving = useMemo(() => {
     if (!runningServer) return null;
-    const i = runningServer.argv.findIndex((a) => a === "-m" || a === "--model");
-    const served = i >= 0 ? runningServer.argv[i + 1] : undefined;
+    const served = servedModelPath(runningServer);
     if (!served) return null;
     const norm = (p: string) => p.replace(/\/+$/, "");
     return models.find((m) => norm(m.file) === norm(served)) ?? null;
   }, [runningServer, models]);
+
+  /** Which MLX directory the running server was started from. */
+  const mlxServing = useMemo(() => {
+    if (!runningServer) return null;
+    const served = servedModelPath(runningServer);
+    if (!served) return null;
+    const norm = (p: string) => p.replace(/\/+$/, "");
+    return mlxModels.find((m) => norm(m.dir) === norm(served)) ?? null;
+  }, [runningServer, mlxModels]);
+
+  /** The MLX install log, read out of the event bus (it streams line by line). */
+  const mlxEvents = bus.events.filter((e) => e.type === "mlx");
+  const mlxLines = mlxEvents
+    .map((e) => String(e.data?.line ?? e.data?.error ?? ""))
+    .filter((l) => l.length > 0)
+    .slice(-30);
+  const mlxStage = String(mlxEvents[mlxEvents.length - 1]?.data?.stage ?? "");
+  const mlxWorking = mlxStage !== "" && !["done", "installed", "error"].includes(mlxStage);
+
+  /** Install or refresh Osama's MLX environment; the log streams over the bus. */
+  async function installMlx() {
+    try {
+      await mlxApi.install();
+      toast.push("info", "Installing the MLX environment — progress streams below.");
+    } catch (e) {
+      toast.push("err", (e as Error).message);
+    }
+  }
+
+  /**
+   * Serve an MLX model and open Chat.
+   *
+   * MLX is exclusive too: one server at a time, so starting this replaces
+   * whatever llama-server was running. The route picks a free port when the
+   * default is taken, and the returned process tells us the real URL.
+   */
+  async function mlxChatWith(m: MlxModel) {
+    setPending(`mlx:${m.dir}`);
+    try {
+      const r = await mlxApi.serve({ model: m.dir, host: SERVER_DEFAULTS.host, port: SERVER_DEFAULTS.port });
+      const url = r.process.url ?? `http://${SERVER_DEFAULTS.host}:8082`;
+      toast.push("info", `${r.stopped?.length ? "Replaced the running server · " : ""}Loading ${m.name} with MLX…`);
+      // mlx-lm loads weights before it binds, so wait for the real thing.
+      const ready = await api.waitForServer(url, 180_000);
+      toast.push(ready ? "ok" : "warn", ready ? `Serving ${m.name} on ${url} (MLX)` : `${m.name} is still loading — give it a moment.`);
+      load();
+      onNavigate("chat");
+    } catch (e) {
+      toast.push("err", `Could not start MLX: ${(e as Error).message}`);
+    } finally {
+      setPending(null);
+    }
+  }
 
   /** Context size picked in the Library picker — persists across opens. */
   const [ctxPick, setCtxPick] = useState<number>(() => {
@@ -311,6 +371,82 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
           )}
           {busy && pending && <div className="faint small" style={{ marginTop: 12 }}>Starting {pendingName} — stopping any other llama-server first…</div>}
         </Card>
+
+        {mlxStatus?.support.supported && (
+          <Card className="card-pad">
+            <CardHead
+              title="MLX models"
+              sub="Apple's own runtime — safetensors directories served by mlx-lm, alongside the GGUF library"
+              right={
+                <div className="row" style={{ gap: 8 }}>
+                  {mlxStatus.runtime.ready ? (
+                    <Badge kind="ok">
+                      {mlxStatus.runtime.source === "managed" ? "Osama's environment" : "system python"} · mlx-lm {mlxStatus.runtime.mlxLmVersion ?? "?"}
+                    </Badge>
+                  ) : (
+                    <Badge kind="warn">no runtime</Badge>
+                  )}
+                  <Button size="sm" variant="ghost" disabled={mlxWorking} onClick={installMlx} title="Create or update Osama's own MLX environment with uv">
+                    {mlxWorking ? <Spinner /> : <Sparkles size={13} />} {mlxStatus.runtime.source === "managed" ? "Update" : "Install"}
+                  </Button>
+                </div>
+              }
+            />
+
+            <div className="small muted">{mlxStatus.runtime.detail}</div>
+
+            {mlxLines.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <Console lines={mlxLines} max={12} />
+              </div>
+            )}
+
+            {!mlxStatus.runtime.ready ? (
+              <div style={{ marginTop: 12 }}>
+                <Empty
+                  icon={<Sparkles size={26} />}
+                  title="No MLX runtime yet"
+                  sub={mlxStatus.runtime.uv ? "Press Install and Osama builds its own environment with uv — a venv plus mlx-lm." : "Install uv first (brew install uv), then press Install."}
+                />
+              </div>
+            ) : mlxModels.length === 0 ? (
+              <div style={{ marginTop: 12 }}>
+                <Empty
+                  icon={<Boxes size={26} />}
+                  title="No MLX models on this machine"
+                  sub={`Drop an mlx-community conversion into ${mlxStatus.paths.home.replace(/\/mlx$/, "/models")} — a directory with config.json and .safetensors weights.`}
+                />
+              </div>
+            ) : (
+              <div className="grid-3" style={{ marginTop: 12 }}>
+                {mlxModels.map((m) => (
+                  <div key={m.dir} className={`tile ${mlxServing?.dir === m.dir ? "active" : ""}`} title={m.dir}>
+                    <div className="title" title={m.name}>{m.name}</div>
+                    <div className="sub">
+                      {m.quantization?.bits ? <Badge kind="accent">{m.quantization.bits}-bit{m.quantization.groupSize ? ` g${m.quantization.groupSize}` : ""}</Badge> : null}
+                      {m.architecture && <Badge>{m.architecture}</Badge>}
+                      {m.hasAdapter && <Badge kind="warn">adapter</Badge>}
+                      {mlxServing?.dir === m.dir && <Badge kind="ok"><span className="dot" /> serving</Badge>}
+                    </div>
+                    <div className="row faint small" style={{ justifyContent: "space-between" }}>
+                      <span>{bytes(m.sizeBytes)}</span>
+                      {m.contextLength ? <span>{Math.round(m.contextLength / 1024)}k ctx</span> : null}
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={mlxServing?.dir === m.dir ? "ghost" : "primary"}
+                      disabled={busy}
+                      onClick={() => mlxChatWith(m)}
+                    >
+                      {busy && pending === `mlx:${m.dir}` ? <Spinner /> : <MessagesSquare size={13} />}
+                      {mlxServing?.dir === m.dir ? (loading ? "Loading…" : "Open chat") : "Serve with MLX"}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Card>
+        )}
 
         {selected && <ModelDetail model={selected} onClose={() => setSelected(null)} onNavigate={onNavigate} onChanged={() => { load(); setSelected(null); }} />}
       </div>

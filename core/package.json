@@ -1,14 +1,14 @@
 {
   "name": "@osama/core",
   "version": "0.1.0",
-  "description": "Osama engine — llama.cpp binary management, Hugging Face model hub, GGUF downloads, process control and command builders.",
+  "description": "Osama engine \u2014 llama.cpp binary management, Hugging Face model hub, GGUF downloads, process control and command builders.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./src/index.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": "./src/index.ts",
       "default": "./dist/index.js"
     }
   },

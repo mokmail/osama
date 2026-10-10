@@ -1,19 +1,126 @@
 # Osama — a local llama.cpp studio
 
+[![CI](https://github.com/mokmail/osama/actions/workflows/ci.yml/badge.svg)](https://github.com/mokmail/osama/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![telemetry](https://img.shields.io/badge/telemetry-none-brightgreen)
+
 Osama runs GGUF models with [llama.cpp](https://github.com/ggml-org/llama.cpp)
 entirely on your machine. It installs the official engine builds, pulls models
 from the Hugging Face hub, serves them over an OpenAI-compatible API, and chats
-with them — including an **agent mode** that can read files, run commands and
-work inside a workspace you choose, off by default and one click away.
+with them — plus an **agent mode** that reads files, runs commands and works
+inside a workspace you choose, off by default and one click away.
 
 Nothing is reimplemented and nothing is simulated: Osama downloads the real
 release archives and executes the actual binaries, so every flag it shows is a
-flag the build accepts, and every number it reports came from a run.
+flag that build accepts, and every number it reports came from a run.
+
+---
+
+## Why Osama
+
+Most local LLM apps are chat windows that happen to bundle an inference engine.
+Osama is the other half of that problem: a studio for **llama.cpp itself** — the
+engine, its sixteen tools, its models, its measurements — with a chat client and
+an agent built on top of exactly those binaries.
+
+### You get upstream llama.cpp, and you choose it
+
+Osama installs release builds straight from `ggml-org/llama.cpp` and runs those
+executables. Pick the build, pick the backend — **CPU, Metal, CUDA, Vulkan,
+ROCm, SYCL, OpenVINO, OpenCL** — and every tool form is generated from that
+build's own `--help`, served live at `GET /api/tools`. When upstream lands a fix,
+you install it that day; you are not waiting for someone to ship a new runtime.
+
+### The whole toolchain, not just a chat box
+
+Sixteen llama.cpp tools, each with a real form, a live command preview, streamed
+progress and a result card: **quantize** (any quant type, per-tensor overrides,
+an importance matrix), **benchmark** and **perplexity** to measure the result,
+**fit parameters**, **GGUF metadata edit**, **split / merge**, **LoRA** merge and
+inspect, **TTS**, **vision**, **tokenize**, **RPC**. Quantize a model until it
+fits your RAM, measure what it cost you, serve it from the same page you measured
+on — instead of three terminals and a spreadsheet.
+
+### An agent that does the work, on your files
+
+Agent mode runs 37 tools against a workspace you choose: read, edit, write and
+search files, run shell commands behind an approval prompt, fetch the web, read
+PDFs page by page, remember facts across sessions, load skills, hand subtasks to
+isolated subagents, schedule recurring jobs, and call your MCP servers. Every
+step streams into the UI as it happens, so you can see what it read, what it
+changed and why. It is off until you turn it on, and the jail is your workspace.
+
+### Local, private, no account
+
+Everything listens on `127.0.0.1`. No telemetry, no sign-in, no API keys, no
+cloud. The server speaks the OpenAI API, so Open WebUI, LangChain, Hermes or any
+other client can point at `http://127.0.0.1:8081/v1` when you want a different
+front end. Desktop app (Tauri) or browser tab — one server backs both, and a run
+keeps going when you switch views.
+
+### Built to be inspected
+
+MIT-licensed and readable end to end: `core/` is the engine layer, `server/` the
+HTTP + SSE API, `ui/` the interface, `src-tauri/` the desktop shell. Typecheck
+and build run on every push, and every claim on this page is checkable in the
+repository — the tool list comes from `GET /api/tools`, the backends from
+`core/src/engine.ts`, the agent tools from `GET /api/agent/tools`.
+
+---
+
+## Osama vs the alternatives
+
+| | Osama | LM Studio | Ollama | Jan | Open WebUI | llama.cpp CLI |
+|---|---|---|---|---|---|---|
+| Install & switch any upstream llama.cpp build, any backend | **yes** | in-app runtimes | bundled runtime | bundled (llama.cpp, MLX) | no engine | you build it |
+| The full llama.cpp toolchain in a GUI | **yes** — 16 tools | no | no | no | no | tools only, no GUI |
+| Quantize with per-tensor types + an importance matrix | **yes** | no | FP16/FP32 presets | no | no | command line |
+| Model discovery, GGUF filtering, resumable downloads | **yes** — HF hub | own catalog | own registry | own catalog | no | no |
+| OpenAI-compatible server you control (flags, slots, ctx) | **yes** | yes | yes | yes | needs one | yes |
+| Chat UI with sessions and streaming | **yes** | yes | CLI only | yes | yes | no |
+| Agent that edits files, runs commands, schedules jobs, calls MCP tools | **yes** — 37 tools | no | no | no | partial (function tools) | no |
+| Desktop app + browser UI + headless CLI + HTTP API | **yes** | desktop | CLI | desktop | browser | CLI |
+| Open source, no account, no telemetry | **MIT** | closed | yes | yes | yes | yes |
+
+Capability-level comparison against those projects' public documentation at the
+time of writing — they move quickly, so check their docs. Everything in the Osama
+column is verifiable in this repo.
+
+### When Osama is the wrong choice
+
+- **You only want a chat window.** LM Studio and Jan are lighter downloads with a
+  polished chat experience, and that is a fine reason to use them.
+- **You only run one model from a terminal.** llama.cpp's own binaries are all you
+  need; Osama is a GUI over exactly those binaries, nothing more magical.
+- **You want MLX on Apple silicon.** LM Studio and Jan ship MLX. Osama drives
+  llama.cpp — Metal on macOS — so if MLX numbers are the point, use those.
+- **You want a shared, multi-user inference platform.** Osama is a studio for one
+  machine, not a serving fleet.
+
+---
+
+## What you get in the first ten minutes
+
+1. `./start.sh` — the app opens on <http://127.0.0.1:5178>, no model shipped.
+2. **llama.cpp** — install an engine build: the latest upstream release, for your
+   OS, architecture and backend.
+3. **Discover** — search the Hugging Face hub, filter to GGUF repos, read the
+   split parts and sizes, download resumably.
+4. **Library** — what you have, with quantisation, parameter count and size.
+5. **Server** — start a server on the model you picked, with every flag
+   explained, then chat with it in **Chat**.
+6. **Quantize / Evaluate** — squeeze the model down, or benchmark it and compare
+   the numbers to the quant you were running before.
+7. **Agent** — point it at a project folder and ask for the change you actually
+   wanted; watch each tool call land, and approve the shell commands.
 
 ---
 
 ## Contents
 
+- [Why Osama](#why-osama)
+- [Osama vs the alternatives](#osama-vs-the-alternatives)
+- [What you get in the first ten minutes](#what-you-get-in-the-first-ten-minutes)
 - [Quick start](#quick-start)
 - [Installation](#installation)
 - [Getting started](#getting-started)

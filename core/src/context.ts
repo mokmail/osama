@@ -207,18 +207,24 @@ export function createMeter(base: string, opts: { model?: string } = {}): Meter 
         }
         return 4096;
       }
-      try {
-        const r = await fetch(`${root}/props`, { signal: AbortSignal.timeout(6000) });
-        if (r.ok) {
-          const p: any = await r.json();
-          const n = p?.default_generation_settings?.n_ctx ?? p?.n_ctx ?? p?.n_ctx_train;
-          if (Number.isFinite(n) && n > 0) {
-            memo.set("window", n);
-            return n;
+      // `/props` is llama.cpp's. Asking an mlx-lm server for it is a guaranteed 404
+      // on every poll (the server logs one per measurement), so skip it once the
+      // engine is known to be MLX.
+      const caps = await detectCaps(root, isOllama);
+      if (caps.engine !== "mlx") {
+        try {
+          const r = await fetch(`${root}/props`, { signal: AbortSignal.timeout(6000) });
+          if (r.ok) {
+            const p: any = await r.json();
+            const n = p?.default_generation_settings?.n_ctx ?? p?.n_ctx ?? p?.n_ctx_train;
+            if (Number.isFinite(n) && n > 0) {
+              memo.set("window", n);
+              return n;
+            }
           }
+        } catch {
+          /* fall through */
         }
-      } catch {
-        /* fall through */
       }
       // mlx-lm has no /props. The model's own config.json is the answer — first for
       // a server Osama started, then for any MLX server, identified by the model id

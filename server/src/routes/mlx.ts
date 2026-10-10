@@ -64,6 +64,13 @@ export const mlxRoutes: RouteModule = (deps) => [
     if (!core.isMlxModelDir(model)) {
       return fail(res, 422, new Error(`${model} is not an MLX model directory — a directory with config.json and .safetensors weights`));
     }
+    // Refuse what the runtime cannot load, before a port is bound: otherwise the
+    // server comes up, /v1/models answers 200, /health answers 503 forever, and the
+    // UI shows a load that never finishes. `force` overrides.
+    if (body.force !== true) {
+      const refusal = core.mlxServeRefusal(model);
+      if (refusal) return fail(res, 409, new Error(refusal));
+    }
     const runtime = await core.detectRuntime();
     if (!runtime.ready) return fail(res, 409, new Error(runtime.detail));
 

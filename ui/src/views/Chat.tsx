@@ -2184,13 +2184,16 @@ function MlxPicker({
           </div>
           {models.map((m) => {
             const active = servedDir === m.dir;
+            const cannotServe = m.servable === false;
             return (
               <button
                 key={m.dir}
                 type="button"
                 role="option"
                 aria-selected={active}
-                className={`mpick-item ${active ? "active" : ""}`}
+                disabled={cannotServe}
+                title={cannotServe ? m.servableNote : m.dir}
+                className={`mpick-item ${active ? "active" : ""} ${cannotServe ? "not-servable" : ""}`}
                 onClick={() => {
                   setOpen(false);
                   if (!active) onServe(m);
@@ -2200,9 +2203,15 @@ function MlxPicker({
                 <span className="mpick-item-body">
                   <span className="mpick-item-name" title={m.dir}>{m.name}</span>
                   <span className="mpick-item-meta">
-                    {m.quantization?.bits ? `${m.quantization.bits}-bit` : "?"}
-                    {m.quantization?.groupSize ? ` g${m.quantization.groupSize}` : ""}
-                    {m.contextLength ? ` · ${Math.round(m.contextLength / 1024)}k ctx` : ""}
+                    {cannotServe ? (
+                      "mlx-lm cannot load this"
+                    ) : (
+                      <>
+                        {m.quantization?.bits ? `${m.quantization.bits}-bit` : "?"}
+                        {m.quantization?.groupSize ? ` g${m.quantization.groupSize}` : ""}
+                        {m.contextLength ? ` · ${Math.round(m.contextLength / 1024)}k ctx` : ""}
+                      </>
+                    )}
                   </span>
                 </span>
                 <span className="mpick-item-size">{bytes(m.sizeBytes)}</span>

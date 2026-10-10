@@ -628,6 +628,30 @@ export function mlxServeCommand(
  * reported as "unsupported".
  */
 let archCache: { at: number; names: Set<string> | null } | null = null;
+/**
+ * Why mlx-lm cannot serve this directory, or `null` when it can.
+ *
+ * This is the guard that matters most: a model mlx-lm cannot build still *starts*
+ * a server — it binds its port, answers `/v1/models` 200 and `/health` 503, and
+ * never loads a weight. From the outside that is a load that never finishes, which
+ * is exactly the "stuck loading" report. Refusing up front, with the reason, is the
+ * only honest answer; `POST /api/mlx/serve` takes `force: true` for the case where
+ * the user wants to try anyway.
+ */
+export function mlxServeRefusal(dir: string): string | null {
+  try {
+    const model = describeMlxModel(dir);
+    if (model.servable === false) {
+      return model.servableNote ?? `${dir} is not a model mlx-lm can serve`;
+    }
+    return null;
+  } catch {
+    // An unreadable directory is already refused by isMlxModelDir; do not invent
+    // a second, contradictory reason here.
+    return null;
+  }
+}
+
 export function mlxArchitectures(): Set<string> | null {
   if (archCache && Date.now() - archCache.at < 10 * 60_000) return archCache.names;
   let names: Set<string> | null = null;

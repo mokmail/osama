@@ -67,7 +67,25 @@ function ProviderLogo({ source, size = 16, title }: { source?: string; size?: nu
   );
 }
 
-export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: ViewId) => void }) {
+/**
+ * Discover, as a section of the Models page.
+ *
+ * It used to be its own view, one nav hop away from the library — but finding a
+ * model and having it are the same job, and the split meant a download finished on
+ * a page that could not show you what you had just fetched. `onInstalled` lets the
+ * library above refresh the moment a download lands, and the "go to the library"
+ * button died with the split because there is nothing left to navigate to.
+ */
+export function DiscoverPanel({
+  bus,
+  onNavigate,
+  onInstalled,
+}: {
+  bus: EventBus;
+  onNavigate: (v: ViewId) => void;
+  /** called when a download finishes, so the library above can re-read itself */
+  onInstalled?: () => void;
+}) {
   const toast = useToast();
   const [query, setQuery] = useState("");
   const [source, setSource] = useState<string>(() => localStorage.getItem("osama.hubSource") ?? "all");
@@ -93,6 +111,7 @@ export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: Vi
   }, []);
 
   useEffect(() => { localStorage.setItem("osama.hubInstallFilter", installFilter); }, [installFilter]);
+
 
   useEffect(() => { localStorage.setItem("osama.hubSource", source); }, [source]);
 
@@ -157,15 +176,30 @@ export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: Vi
   const installedShown = models.filter(isInstalled).length;
 
   const downloads = bus.events.filter((e) => e.type === "download").slice(-8).reverse();
+  /** A finished download is the moment the library above is out of date. */
+  const lastInstalled = useRef<string | null>(null);
+  useEffect(() => {
+    const done = downloads.filter((d) => d.data?.stage === "done").slice(-1)[0];
+    const key = done ? `${done.data.repo ?? ""}:${done.data.file ?? ""}:${done.data.total ?? 0}` : null;
+    if (key && key !== lastInstalled.current) {
+      lastInstalled.current = key;
+      onInstalled?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [downloads.length]);
 
   if (repo) {
-    return <RepoDetail repo={repo} onBack={() => setRepo(null)} totalMem={system?.system.totalMemBytes ?? 0} onNavigate={onNavigate} />;
+    return <RepoDetail repo={repo} onBack={() => setRepo(null)} totalMem={system?.system.totalMemBytes ?? 0} />;
   }
 
   return (
-    <div className="stack">
+    <>
+      <div className="stack" id="discover" style={{ scrollMarginTop: 12 }}>
       <Card className="card-pad">
-        <CardHead title="Discover models" sub="Search the Hugging Face Hub for ready-to-run GGUF models." />
+        <CardHead
+          title="Discover models"
+          sub="Search every source for ready-to-run GGUF models — or paste a direct .gguf link."
+        />
         <form className="row" onSubmit={search} style={{ gap: 10 }}>
           <span className="row" style={{ gap: 8, alignItems: "center" }}>
             {source !== "all" && <ProviderLogo source={source} size={18} title />}
@@ -285,11 +319,12 @@ export function HubView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v: Vi
           </div>
         )}
       </Card>
-    </div>
+      </div>
+    </>
   );
 }
 
-function RepoDetail({ repo, onBack, totalMem, onNavigate }: { repo: HubRepo; onBack: () => void; totalMem: number; onNavigate: (v: ViewId) => void }) {
+function RepoDetail({ repo, onBack, totalMem }: { repo: HubRepo; onBack: () => void; totalMem: number }) {
   const toast = useToast();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const mains = repo.files.filter((f) => f.isMain);
@@ -364,7 +399,7 @@ function RepoDetail({ repo, onBack, totalMem, onNavigate }: { repo: HubRepo; onB
           <Button variant="primary" onClick={download} disabled={selected.size === 0}>
             <Download size={15} /> Download {selected.size || ""} {selected.size === 1 ? "file" : "files"}
           </Button>
-          <Button onClick={onNavigate.bind(null, "models")}>Go to library</Button>
+
         </div>
       </Card>
     </div>

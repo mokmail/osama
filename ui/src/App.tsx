@@ -9,7 +9,6 @@ import { ToastProvider, useToast } from "./components/ui";
 import { Dashboard } from "./views/Dashboard";
 import { EngineView } from "./views/Engine";
 import { ModelsView } from "./views/Models";
-import { HubView } from "./views/Hub";
 import { ToolView } from "./views/ToolView";
 import { ServerView } from "./views/Server";
 import { ChatView } from "./views/Chat";
@@ -55,8 +54,9 @@ const NAV: Array<{ group: string; items: Array<{ id: ViewId; label: string; icon
   {
     group: "Models",
     items: [
-      { id: "models", label: "Library", icon: Boxes },
-      { id: "hub", label: "Discover", icon: Download },
+      // Library and Discover are one page: you find a model and you have it, so the
+      // nav hop between them was a page that could not show you what you just fetched.
+      { id: "models", label: "Models", icon: Boxes },
     ],
   },
   {
@@ -230,8 +230,7 @@ function Shell() {
           <div className="content-inner">
             {view === "dashboard" && <Dashboard system={system} bus={bus} onNavigate={setView} />}
             {view === "chat" && <ChatView system={system} bus={bus} onNavigate={setView} />}
-            {view === "models" && <ModelsView bus={bus} onNavigate={setView} />}
-            {view === "hub" && <HubView bus={bus} onNavigate={setView} />}
+            {(view === "models" || view === "hub") && <ModelsView bus={bus} onNavigate={setView} />}
             {view === "engine" && <EngineView system={system} bus={bus} />}
             {view === "server" && <ServerView bus={bus} onNavigate={setView} />}
             {view === "run" && <ToolView group="run" bus={bus} />}

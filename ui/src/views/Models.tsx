@@ -5,6 +5,7 @@ import type { LocalModel, ManagedProcess } from "../lib/types";
 import { Badge, Button, Card, CardHead, Console, Empty, Field, Spinner, usePoll, useToast } from "../components/ui";
 import { ModelLoading, useServerReady, useLoadFailure, FailedLoad } from "../components/ModelLoading";
 import { GgufPicker } from "../components/GgufPicker";
+import { DiscoverPanel } from "./Hub";
 import { bytes, fileBase, shortPath, timeAgo } from "../lib/format";
 import type { EventBus } from "../App";
 import type { ViewId } from "../App";
@@ -495,7 +496,11 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
               icon={<Boxes size={28} />}
               title="No models in the library"
               sub="Download one from Discover, or import an existing GGUF file."
-              action={<Button variant="primary" onClick={() => onNavigate("hub")}>Discover models</Button>}
+              action={
+                <Button variant="primary" onClick={() => document.getElementById("discover")?.scrollIntoView({ behavior: "smooth", block: "start" })}>
+                  Discover models
+                </Button>
+              }
             />
           ) : (
             <div className="grid-3">
@@ -747,6 +752,8 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
             )}
           </Card>
         )}
+
+        <DiscoverPanel bus={bus} onNavigate={onNavigate} onInstalled={load} />
 
         {selected && <ModelDetail model={selected} onClose={() => setSelected(null)} onNavigate={onNavigate} onChanged={() => { load(); setSelected(null); }} />}
       </div>

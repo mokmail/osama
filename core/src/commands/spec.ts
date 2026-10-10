@@ -27,7 +27,15 @@ export interface ParamSpec {
   help?: string;
   group: string;
   default?: string | number | boolean;
+  /**
+   * A concrete sample value, rendered as the field's placeholder when it is
+   * empty. Unlike `default` it never changes what runs — it only shows the user
+   * the shape of a valid answer, so forms stay honest about their argv.
+   */
+  example?: string;
   enum?: string[];
+  /** Per-option explanation for enum pickers, keyed by option value. */
+  enumHelp?: Record<string, string>;
   /** true if the value is a positional argument rather than a flag */
   positional?: boolean;
   /** UI ordering hint inside a group */
@@ -48,6 +56,12 @@ export interface ParamSpec {
    */
   joinCommas?: boolean;
   /**
+   * The tool cannot run without it. The UI marks it and refuses to launch a
+   * command that would fail on a missing positional (e.g. llama-quantize with
+   * no input prints only the quant type).
+   */
+  required?: boolean;
+  /**
    * Other param keys that must have a value for this one to be emitted. Used
    * where a tool has mutually exclusive modes (e.g. gguf-split --merge needs a
    * directory, not a single file).
@@ -63,6 +77,11 @@ export interface ToolSpec {
   binary: string;
   title: string;
   summary: string;
+  /**
+   * How this tool works, in the order a user needs it: what the inputs are for,
+   * which ones actually matter, and what the output is. Rendered above the form.
+   */
+  notes?: string[];
   group: "run" | "serve" | "create" | "evaluate" | "inspect" | "distribute" | "edit";
   /** long-running process (start/stop) vs one-shot (run to completion) */
   mode: "process" | "oneshot";
@@ -116,6 +135,73 @@ export const GGML_TYPES = [
   "f32", "f16", "bf16", "q8_0", "q6_k", "q5_k", "q5_1", "q5_0",
   "q4_k", "q4_1", "q4_0", "iq4_nl", "iq4_xs", "q3_k", "q2_k", "iq3_s",
 ] as const;
+
+/**
+ * What each quant type costs and buys, one line each.
+ *
+ * A handful are hand-written; `quantNote` fills the rest in from family
+ * patterns, so adding a type to QUANT_TYPES cannot leave the picker mute.
+ */
+export const QUANT_NOTES: Record<string, string> = {
+  Q8_0: "Nearly lossless (~8.5 bits). Use when size is not the constraint.",
+  Q6_K: "Very close to the original (~6.6 bits).",
+  Q5_K_M: "High quality — the safe step up if Q4_K_M shows damage.",
+  Q5_K_S: "A little smaller than Q5_K_M, a little more loss.",
+  Q5_1: "Legacy 5-bit; Q5_K_M is better at the same size.",
+  Q5_0: "Legacy 5-bit; Q5_K_M is better at the same size.",
+  Q4_K_M: "The default: best size/quality balance for most models.",
+  Q4_K_S: "A little smaller than Q4_K_M, a little more loss.",
+  Q4_1: "Legacy 4-bit; Q4_K_M beats it at a similar size.",
+  Q4_0: "Legacy 4-bit; Q4_K_M beats it at a similar size.",
+  IQ4_NL: "Importance-aware 4-bit — give it an imatrix.",
+  IQ4_XS: "Smallest 4-bit i-quant — give it an imatrix.",
+  MXFP4_MOE: "FP4 for mixture-of-experts tensors (models shipped in MXFP4).",
+  BF16: "Unquantized 16-bit: half the size, no quantization error.",
+  F16: "Unquantized 16-bit: half the size, no quantization error.",
+  F32: "Unquantized 32-bit: the largest and the reference.",
+  COPY: "Copies tensors unchanged — metadata work, not quantizing.",
+};
+
+/** A note for ANY quant type: hand-written if we have one, else by family. */
+export function quantNote(type: string): string {
+  const exact = QUANT_NOTES[type];
+  if (exact) return exact;
+  if (/^IQ1/.test(type)) return "1-bit i-quant — extreme size limits, heavy loss.";
+  if (/^IQ2/.test(type)) return "2-bit i-quant — an imatrix is strongly recommended.";
+  if (/^IQ3/.test(type)) return "3-bit i-quant — an imatrix is strongly recommended.";
+  if (/^IQ/.test(type)) return "Importance-aware quant — best with an imatrix.";
+  if (/^TQ/.test(type)) return "Ternary (~1.6-bit) — experimental, for extreme size limits.";
+  if (/^Q2/.test(type)) return "2-bit — expect visible quality loss.";
+  if (/^Q3/.test(type)) return "3-bit k-quant — below Q4 the drop is usually noticeable.";
+  if (/^Q1/.test(type)) return "1-bit — experimental, for extreme size limits.";
+  if (/_K/.test(type)) return "k-quant: mixed precision per tensor.";
+  return "Quantized type — measure quality if it is below 4 bits.";
+}
+
+/** The quant picker's notes, materialised (a function cannot cross JSON). */
+export const QUANT_ENUM_HELP: Record<string, string> = Object.fromEntries(
+  QUANT_TYPES.map((t) => [t, quantNote(t)]),
+);
+
+/** Notes for `--output-tensor-type` / `--token-embedding-type` pickers. */
+export const GGML_ENUM_HELP: Record<string, string> = {
+  f32: "Reference — no error, 4 bytes per weight.",
+  f16: "Half the size of f32, no visible loss.",
+  bf16: "Like f16, with a wider exponent range.",
+  q8_0: "8-bit quant — near-lossless and safe.",
+  q6_k: "6-bit k-quant — very close to f16.",
+  q5_k: "5-bit k-quant — mild loss.",
+  q5_1: "Legacy 5-bit.",
+  q5_0: "Legacy 5-bit.",
+  q4_k: "4-bit k-quant — the usual choice for an output tensor.",
+  q4_1: "Legacy 4-bit.",
+  q4_0: "Legacy 4-bit.",
+  iq4_nl: "Importance-aware 4-bit.",
+  iq4_xs: "Smallest 4-bit variant.",
+  q3_k: "3-bit k-quant — lossy.",
+  q2_k: "2-bit k-quant — lossy.",
+  iq3_s: "3-bit i-quant — lossy.",
+};
 
 export const modelParams: ParamSpec[] = [
   { key: "model", flag: "-m", aliases: ["--model"], type: "model", label: "Model file", help: "Path to a local GGUF file.", group: "Model", order: 1 },

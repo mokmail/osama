@@ -23,6 +23,8 @@ export interface StoredMessage {
   attachments?: Attachment[];
   steps?: AgentStep[];
   stepCount?: number;
+  nudges?: number;
+  changed?: boolean;
 }
 
 export interface PersistedChatState {

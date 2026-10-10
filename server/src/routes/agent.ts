@@ -438,6 +438,48 @@ export const agentRoutes: RouteModule = (deps) => {
       });
     }),
 
+    /**
+     * The harness inventory, for the Dashboard's Agent section.
+     *
+     * Gathered here rather than from five UI calls so the counts cannot disagree
+     * with each other — the MCP tool count comes from the same list the registry
+     * is built from — and so the dashboard makes one request per poll.
+     */
+    route("GET", "/api/agent/stats", ({ res }) => {
+      const builtIn = core.AGENT_TOOLS;
+      const mutating = builtIn.filter((t) => t.mutating).length;
+      const mcpTools = core.mcpToolSpecs();
+      const mcp = core.mcpStatuses();
+      const mem = core.memoryStats();
+      const used = mem.chars.global + mem.chars.workspace + mem.user.chars;
+      const budget = mem.budget.global + mem.budget.workspace + mem.user.budget;
+      const sessions = core.listSessions();
+      const jobs = core.listJobs();
+      json(res, 200, {
+        tools: {
+          builtIn: builtIn.length,
+          mutating,
+          readOnly: builtIn.length - mutating,
+          mcp: mcpTools.length,
+          total: builtIn.length + mcpTools.length,
+        },
+        skills: { total: core.discoverSkills().length, roots: core.skillRoots().length },
+        memory: {
+          entries: core.listMemory().length,
+          used,
+          budget,
+          percent: budget > 0 ? Math.round((used / budget) * 100) : 0,
+        },
+        sessions: {
+          total: sessions.length,
+          last: sessions.map((s) => s.updatedAt).sort().pop() ?? null,
+        },
+        jobs: { total: jobs.length, enabled: jobs.filter((j) => j.enabled).length },
+        mcp: { servers: mcp.length, connected: mcp.filter((s) => s.connected).length, tools: mcpTools.length },
+        workspace: { path: core.getWorkspace(), chosen: core.workspaceChosen() },
+      });
+    }),
+
     // --- workspaces the agent may work inside -------------------------------
     route("GET", "/api/workspaces", ({ res }) => {
       json(res, 200, {
@@ -460,11 +502,36 @@ export const agentRoutes: RouteModule = (deps) => {
       json(res, 200, { ok: true, path: r.path, created: r.created, readRoots: core.readRoots(), writableRoots: core.writableRoots() });
     }),
 
-    // The directory browser behind the workspace picker.
+    /**
+     * The directory browser behind the workspace and GGUF pickers.
+     *
+     * `files=gguf` widens the listing to files with that extension, with sizes,
+     * so a model can be picked off the disk instead of only from the library.
+     * `@models` / `@workspace` / `@home` are shortcuts the pickers can start at
+     * without a round-trip to discover their own paths.
+     */
     route("GET", "/api/browse", ({ res, url }) => {
-      const r = core.browseDirectories(q(url, "path") ?? core.getWorkspace());
+      const ext = (q(url, "files") ?? "").trim();
+      const files = ext ? [ext.startsWith(".") ? ext : `.${ext}`] : [];
+      const asked = q(url, "path");
+      const start =
+        asked === "@models"
+          ? core.paths().models
+          : asked === "@workspace"
+            ? core.getWorkspace()
+            : asked === "@home"
+              ? process.env.HOME ?? core.getWorkspace()
+              : asked ?? core.getWorkspace();
+      const r = core.browseDirectories(start, { files });
       if (!r.ok) return fail(res, 400, new Error(r.error ?? "cannot list that folder"));
-      json(res, 200, { path: r.path, parent: r.parent ?? null, home: r.home ?? null, entries: r.entries ?? [] });
+      json(res, 200, {
+        path: r.path,
+        parent: r.parent ?? null,
+        home: r.home ?? null,
+        modelsDir: r.modelsDir ?? null,
+        workspace: r.workspace ?? null,
+        entries: r.entries ?? [],
+      });
     }),
 
     // --- workspace files: the composer's `@`-mention picker ------------------

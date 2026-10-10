@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  AgentStats,
   AgentToolsResponse,
   ArtifactPreview,
   ArtifactsResponse,
@@ -9,6 +10,7 @@ import type {
   ContextRequestMessage,
   DirListing,
   DownloadRecord,
+  FindGgufResponse,
   EnginePlan,
   GgufInspectResponse,
   HubModel,
@@ -90,7 +92,24 @@ export const api = {
   processLog: (id: string) => get<{ id: string; lines: string[] }>(`/api/processes/${id}/log`),
   stopProcess: (id: string) => post<{ ok: boolean }>(`/api/processes/${id}/stop`),
 
+  /**
+   * The directory browser behind the workspace and GGUF pickers.
+   * Pass `files: ["gguf"]` to include files with that extension (with sizes), and
+   * `@models` / `@workspace` / `@home` instead of a path to start at a shortcut.
+   */
+  browse: (path?: string, files?: string[]) =>
+    get<BrowseResponse>(
+      `/api/browse${path ? `?path=${encodeURIComponent(path)}` : ""}` +
+        `${files?.length ? `${path ? "&" : "?"}files=${encodeURIComponent(files.join(","))}` : ""}`,
+    ),
+
   models: () => get<{ models: LocalModel[] }>("/api/models"),
+  /** Search a folder (bounded, recursive) for GGUF files — the model picker. */
+  findGgufs: (dir: string, opts: { depth?: number; max?: number } = {}) =>
+    get<FindGgufResponse>(
+      `/api/models/find?dir=${encodeURIComponent(dir)}` +
+        `${opts.depth !== undefined ? `&depth=${opts.depth}` : ""}${opts.max !== undefined ? `&max=${opts.max}` : ""}`,
+    ),
   scanModels: () => post<{ models: LocalModel[] }>("/api/models/scan"),
   addModel: (body: { file: string; repo?: string; name?: string }) => post<{ model: LocalModel }>("/api/models/add", body),
   modelCard: (id: string) => get<{ card: ModelCard }>(`/api/models/${id}/card`),
@@ -238,6 +257,8 @@ export function subscribeEvents(onEvent: (e: { type: string; data: any; ts: numb
 
 export const agentApi = {
   tools: () => get<AgentToolsResponse>("/api/agent/tools"),
+  /** Harness inventory for the Dashboard: tools, skills, memory, jobs, MCP. */
+  stats: () => get<AgentStats>("/api/agent/stats"),
   skills: () => get<{ skills: SkillMeta[]; roots: string[] }>("/api/agent/skills"),
   memory: () => get<MemoryResponse>("/api/agent/memory"),
   todos: () => get<{ todos: TodoItem[] }>("/api/agent/todos"),
@@ -329,10 +350,6 @@ export const agentApi = {
   workspaces: () => get<WorkspacesResponse>("/api/workspaces"),
   setWorkspace: (path: string, create = true) =>
     post<{ ok: boolean; path: string; created?: boolean }>("/api/workspaces", { path, create }),
-
-  /** The directory browser behind the workspace picker. */
-  browse: (path?: string) =>
-    get<BrowseResponse>(`/api/browse${path ? `?path=${encodeURIComponent(path)}` : ""}`),
 
   /** Files inside the agent workspace — backs the composer's `@` picker. */
   workspaceFiles: () => get<{ path: string; files: WorkspaceFile[]; truncated: boolean }>("/api/workspace/files"),

@@ -47,6 +47,9 @@ export function RunIndicator({ onOpenChat }: { onOpenChat: () => void }) {
     : waiting === "question" ? "needs an answer"
     : run.status.error ? "run failed"
     : doing ? `${doing.label}${doing.target ? ` ${doing.target}` : ""}${extra > 0 ? ` +${extra}` : ""}`
+    // While the harness is pushing a narrating model back to work, say so —
+    // otherwise the turn looks stuck (no tool in flight, no output yet).
+    : run.status.notice ? run.status.notice
     : "running";
 
   return (

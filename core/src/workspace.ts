@@ -126,12 +126,19 @@ export function workspaceCandidates(): Array<{ path: string; label: string; exis
 }
 
 export interface BrowseEntry {
+  /** true for a file (only returned when the caller asked for extensions). */
+  file?: boolean;
+  /** bytes, for files */
+  size?: number;
   name: string;
   path: string;
   hidden: boolean;
 }
 
 export interface BrowseResult {
+  /** the library directory, so a picker can offer it as a shortcut */
+  modelsDir?: string;
+  workspace?: string;
   ok: boolean;
   path?: string;
   parent?: string | null;
@@ -145,7 +152,15 @@ export interface BrowseResult {
  * Directories only (the workspace must be one), hidden entries included but
  * sorted last, symlinked dirs resolved so they behave like the real thing.
  */
-export function browseDirectories(dir: string): BrowseResult {
+/**
+ * List a directory for the folder pickers.
+ *
+ * Directories only by default (that is what the workspace picker wants).
+ * `opts.files` adds files whose extension matches — the GGUF picker passes
+ * `.gguf` so a model can be chosen off the disk, not just from the library.
+ * Sizes come along so the caller can show them without a second call.
+ */
+export function browseDirectories(dir: string, opts: { files?: string[] } = {}): BrowseResult {
   const raw = dir?.trim();
   if (!raw) return { ok: false, error: "a path is required" };
   const resolved = path.resolve(raw.startsWith("~") ? raw.replace(/^~/, process.env.HOME ?? "") : raw);
@@ -156,23 +171,46 @@ export function browseDirectories(dir: string): BrowseResult {
     return { ok: false, error: `${resolved} does not exist` };
   }
 
+  const wanted = (opts.files ?? []).map((x) => x.toLowerCase());
+
   try {
     const entries = fs
       .readdirSync(resolved, { withFileTypes: true })
-      .filter((e) => {
-        if (e.isDirectory()) return true;
-        if (!e.isSymbolicLink()) return false;
+      .map((e): BrowseEntry | null => {
+        const full = path.join(resolved, e.name);
+        let isDir = e.isDirectory();
+        let size: number | undefined;
+        // A symlinked model (HF cache style) must resolve, or it looks absent.
         try {
-          return fs.statSync(path.join(resolved, e.name)).isDirectory();
+          const st = fs.statSync(full);
+          isDir = isDir || st.isDirectory();
+          size = st.size;
         } catch {
-          return false; // broken link
+          return null; // broken link
         }
+        if (isDir) return { name: e.name, path: full, hidden: e.name.startsWith(".") };
+        if (!wanted.some((ext) => e.name.toLowerCase().endsWith(ext))) return null;
+        return { name: e.name, path: full, hidden: e.name.startsWith("."), file: true, size };
       })
-      .map((e) => ({ name: e.name, path: path.join(resolved, e.name), hidden: e.name.startsWith(".") }))
-      .sort((a, b) => (a.hidden === b.hidden ? a.name.localeCompare(b.name) : a.hidden ? 1 : -1));
+      .filter((e): e is BrowseEntry => e !== null)
+      .sort((a, b) => {
+        // Folders first, then files — both hidden-last — so the picker reads
+        // like a file browser instead of one alphabetical soup.
+        if (!!a.file !== !!b.file) return a.file ? 1 : -1;
+        if (a.hidden !== b.hidden) return a.hidden ? 1 : -1;
+        return a.name.localeCompare(b.name);
+      });
 
     const parent = path.dirname(resolved);
-    return { ok: true, path: resolved, parent: parent === resolved ? null : parent, home: process.env.HOME ?? null, entries };
+    return {
+      ok: true,
+      path: resolved,
+      parent: parent === resolved ? null : parent,
+      home: process.env.HOME ?? null,
+      modelsDir: path.join(osamaHome(), "models"),
+      workspace: getWorkspace(),
+      entries,
+    };
   } catch (e) {
     return { ok: false, error: `cannot list ${resolved}: ${(e as Error).message}` };
   }

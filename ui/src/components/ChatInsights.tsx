@@ -3,13 +3,14 @@ import {
   AlertTriangle, Brain, CalendarClock, FileCode2, FolderOpen, History, Plug, Ruler, Settings2,
   Sparkles, Wrench, Plus, Trash2, X, Play, Square,
 } from "lucide-react";
-import { agentApi, type AgentMessagePayload } from "../lib/api";
+import { agentApi, api, type AgentMessagePayload } from "../lib/api";
 import type {
   AgentTool, BrowseResponse, ContextBreakdown, ContextRequestMessage,
   MemoryEntry, MemoryStats, PromptSection, RemoteSkill, SkillMeta, TodoItem, WorkspacesResponse, WorkspaceCandidate,
 } from "../lib/types";
 import { fileBase } from "../lib/format";
 import type { StoredChat } from "../lib/chatStore";
+import { Modal } from "./ui";
 import { MemoryModal, SoulModal } from "./IdentityPanels";
 import { ArtifactsModal } from "./ArtifactBrowser";
 import { McpPanel } from "./McpPanel";
@@ -167,25 +168,6 @@ const MODAL_TITLES: Record<QuickPanelId, string> = {
 };
 
 /* ------------------------------------------------------------- modal shell */
-
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
-  return (
-    <div className="qmodal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
-      <div className="qmodal" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="qmodal-head">
-          <span className="qmodal-title">{title}</span>
-          <button className="qmodal-x" onClick={onClose} aria-label="Close"><X size={14} /></button>
-        </div>
-        <div className="qmodal-body">{children}</div>
-      </div>
-    </div>
-  );
-}
 
 function QuickBtn({ id, icon, label, badge, onClick }: {
   id: QuickPanelId;
@@ -544,7 +526,7 @@ function WorkspaceModal({ onWorkspaceChange }: { onWorkspaceChange?: (w: { path:
   async function open(at?: string) {
     setBrowseErr("");
     try {
-      setBrowse(await agentApi.browse(at));
+      setBrowse(await api.browse(at));
     } catch (e) {
       setBrowseErr((e as Error).message);
     }

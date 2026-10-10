@@ -114,12 +114,47 @@ export function Button({
 
 /* ------------------------------------------------------------------ fields */
 
-export function Field({ label, help, children }: { label: string; help?: string; children: ReactNode }) {
+export function Field({ label, help, required, children }: { label: string; help?: string; required?: boolean; children: ReactNode }) {
   return (
     <div className="field">
-      <label>{label}</label>
+      <label>
+        {label}
+        {required && <span className="req">required</span>}
+      </label>
       {children}
       {help && <span className="help">{help}</span>}
+    </div>
+  );
+}
+
+/* -------------------------------------------------------------------- modal */
+
+/**
+ * The app's dialog shell: overlay, hairline card, Escape and click-outside to
+ * close. Shared so every modal behaves the same way instead of each view
+ * inventing its own.
+ */
+export function Modal({ title, onClose, children, width }: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  /** CSS width for wide dialogs (the GGUF picker needs room). */
+  width?: string;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="qmodal-overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="qmodal" role="dialog" aria-modal="true" aria-label={title} style={width ? { width } : undefined}>
+        <div className="qmodal-head">
+          <span className="qmodal-title">{title}</span>
+          <button className="qmodal-x" onClick={onClose} aria-label="Close"><X size={14} /></button>
+        </div>
+        <div className="qmodal-body">{children}</div>
+      </div>
     </div>
   );
 }

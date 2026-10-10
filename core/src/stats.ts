@@ -4,7 +4,7 @@ import path from "node:path";
 import { paths } from "./paths.js";
 import { listModels, listDownloads } from "./models.js";
 import { listProcesses } from "./processes.js";
-import { listInstalled, getActiveEngine, KNOWN_TOOLS } from "./engine.js";
+import { listInstalled, getActiveEngine, KNOWN_TOOLS, DRIVEN_TOOLS } from "./engine.js";
 
 /**
  * Aggregate everything Osama knows about the machine, the engine, the library
@@ -53,6 +53,11 @@ export interface StatsSnapshot {
     tools: number;
     toolNames: string[];
     knownTools: number;
+    /** KNOWN_TOOLS entries this particular build does not ship. */
+    missingTools: string[];
+    /** How many of the command catalogue's front-ends resolved. */
+    frontEndsPresent: number;
+    frontEndsTotal: number;
     enginesInstalled: number;
     sizeBytes: number;
   };
@@ -286,10 +291,22 @@ export function buildStats(activity: ActivityEntry[] = []): StatsSnapshot {
       : { id: "engine", label: "llama.cpp engine", status: "fail", detail: "no build installed" },
   );
   const toolCount = engine ? Object.keys(engine.tools).length : 0;
+  // Coverage is measured against the release's own tool set, but only the
+  // binaries the app actually drives can fail the check: a build quietly
+  // missing an optional extra is not a problem, one missing llama-server is.
+  const missingTools = engine ? KNOWN_TOOLS.filter((t) => !engine.tools[t]) : [];
+  const missingFrontEnds = engine ? DRIVEN_TOOLS.filter((t) => !engine.tools[t]) : [];
   checks.push(
-    toolCount > 0
-      ? { id: "tools", label: "Tool binaries", status: toolCount >= 10 ? "ok" : "warn", detail: `${toolCount} of ${KNOWN_TOOLS.length} known tools present` }
-      : { id: "tools", label: "Tool binaries", status: "fail", detail: "none resolved" },
+    toolCount === 0
+      ? { id: "tools", label: "Tool binaries", status: "fail", detail: "none resolved" }
+      : missingFrontEnds.length > 0
+        ? { id: "tools", label: "Tool binaries", status: "warn", detail: `missing ${missingFrontEnds.join(", ")}` }
+        : {
+            id: "tools",
+            label: "Tool binaries",
+            status: "ok",
+            detail: `${toolCount} of ${KNOWN_TOOLS.length} shipped · all ${DRIVEN_TOOLS.length} front-ends present`,
+          },
   );
   checks.push(
     models.length > 0
@@ -341,6 +358,9 @@ export function buildStats(activity: ActivityEntry[] = []): StatsSnapshot {
       tools: toolCount,
       toolNames: engine ? Object.keys(engine.tools).sort() : [],
       knownTools: KNOWN_TOOLS.length,
+      missingTools,
+      frontEndsPresent: DRIVEN_TOOLS.length - missingFrontEnds.length,
+      frontEndsTotal: DRIVEN_TOOLS.length,
       enginesInstalled: engines.length,
       sizeBytes: enginesUsage.bytes,
     },

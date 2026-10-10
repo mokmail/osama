@@ -1,9 +1,12 @@
 import { executeTool, executeSchedulerTool, toolSchemas, toolByName, isSchedulerTool, type ToolResult, executeContextTool, isContextTool, QUESTION_TIMEOUT_MS, type TodoItem } from "./tools.js";
 import { appendEvents } from "./sessions.js";
-import { applyCompaction, planCompaction, summarizationPrompt } from "./compact.js";
+import { applyCompaction, planCompaction, planResultElision, summarizationPrompt } from "./compact.js";
 import { type ChatMessage, type Meter, measureContext } from "./context.js";
 import { createSteerQueue, delegateSubagent, type SteerQueue } from "./orchestr.js";
 import { buildPrompt, type BuiltPrompt } from "./prompt.js";
+import { logger } from "./logger.js";
+
+const log = logger("agent");
 
 /**
  * The agentic loop.
@@ -56,9 +59,23 @@ export type AgentEvent =
   | { type: "denied"; id: string; name: string; reason: string }
   | { type: "compaction"; reason: string; before: number; after: number; kept: number }
   | { type: "steer_applied"; text: string; step: number }
+  /**
+   * The model answered with a plan instead of calling the tool it described, so
+   * the turn was continued. `attempt` counts how many times this turn has been
+   * nudged; the client shows it so a "still working" turn is explained.
+   */
+  | { type: "action_nudge"; attempt: number }
   | { type: "delegate_call"; id: string; task: string }
   | { type: "delegate_result"; id: string; ok: boolean; text: string; steps: number; durationMs: number }
-  | { type: "final"; text: string; steps: number }
+  | {
+      type: "final";
+      text: string;
+      steps: number;
+      /** A mutating tool completed this turn — something was actually changed. */
+      changed: boolean;
+      /** How many times the model had to be asked to act instead of narrating. */
+      nudges: number;
+    }
   | { type: "error"; message: string };
 
 /**
@@ -157,6 +174,48 @@ export interface RunAgentOptions {
 }
 
 const DEFAULT_MAX_STEPS = 20;
+
+/**
+ * How many times one turn may be continued because the model described a tool
+ * call instead of making it. Two is enough to recover a real attempt; a third
+ * would just burn context on a model that cannot emit the call at all (or on a
+ * genuinely finished answer written with forward-looking wording).
+ */
+const MAX_ACTION_NUDGES = 2;
+
+/**
+ * Ceiling on mid-turn compactions. Each one costs a summarisation round trip and
+ * shrinks the transcript, so more than a couple per turn is a sign of a problem
+ * that compacting cannot fix; the cap keeps that from becoming a loop.
+ */
+const MAX_TURN_COMPACTIONS = 3;
+
+/**
+ * Does this reply announce work it did not do?
+ *
+ * Observed failure this exists for: asked to change a stylesheet, a quantized
+ * coding model called `tree` + `read_file`, then answered
+ * "I'll examine the workspace structure … Now I'll look at the index.css file to
+ * see the current padding styles:" — an announcement, no edit. The loop saw a
+ * text-only turn and treated it as the final answer, so the user got a plan and
+ * no change. A pure question answered in prose must NOT match: the patterns
+ * require forward-looking first-person wording, and completion/result wording
+ * ("done", "changed", "added", "no change needed") vetoes a match outright.
+ */
+export function looksLikePlan(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t) return false;
+  // A long reply is prose, not a one-line plan; a short one that asks the user
+  // something is a question, not a promise.
+  if (t.length > 900) return false;
+  if (/\?\s*$/.test(t)) return false;
+  if (/\b(?:done|finished|complete[d]?|changed|updated|added|created|removed|i have|i've|no change(?:s)? (?:needed|required)|nothing to change)\b/i.test(t)) return false;
+  // "I'll …", "Now I'll …", "Let me …", "First, I will …", "Next, I'm going to …"
+  const intent = /(?:^|[\n.!?]\s*)(?:now\s+|first\s*,?\s*|next\s*,?\s*|then\s*,?\s*)?(?:i'?ll|i will|i'?m going to|i am going to|i'?d better|let me|let'?s)\b/i;
+  if (!intent.test(t)) return false;
+  // …and it points at tool work rather than at the user's own next move.
+  return /\b(?:read|open|look|check|examine|inspect|edit|update|change|modify|fix|add|remove|delete|create|write|run|search|find|list|grep|review|implement|apply|refactor|test)\b/i.test(t);
+}
 
 /**
  * Parse the model's JSON arguments; a truncated or slightly malformed blob must
@@ -364,31 +423,43 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
   /** True when a name belongs to an injected (MCP) tool rather than a built-in. */
   const isExtraTool = (name: string): boolean => extraTools.some((t) => t.name === name);
 
-  /**
-   * Compact when the request would not fit. Runs once before the first model
-   * call if `opts.compaction` is `auto` or `ask`. The plan keeps at least the
-   * most recent exchange verbatim and never splits a tool result from its
-   * call — the split point is on the assistant turn, never the tool reply.
-   */
   /** Compaction policy for this turn ('auto' by default). */
   const compaction = opts.compaction ?? "auto";
   const approveCompact = opts.compactApprove ?? (async () => true);
-  if (compaction !== "off" && opts.meter) {
-    const compacted = await maybeCompact({ messages, tools, meter: opts.meter, model: opts.model, transport: opts.transport, signal: opts.signal, policy: compaction, approve: approveCompact });
-    if (compacted.did) {
-      // Replace the in-memory list with the compacted one. The agent loop then
-      // continues against a smaller request; the originals stay in the session
-      // log via appendEvents below, so replay still sees them.
-      yield { type: "compaction", reason: compacted.reason, before: compacted.before, after: compacted.after, kept: compacted.kept };
-      appendEvents(opts.sessionId ?? "", opts.workspace, [
-        { kind: "summary", data: { kind: "compaction", before: compacted.before, after: compacted.after, reason: compacted.reason } },
-      ]);
-      // Splice the compacted list back in.
-      const [sys, ...rest] = messages;
-      const [newSys, ...newRest] = compacted.messages;
-      messages.length = 0;
-      messages.push(...(newSys ? [newSys, ...newRest] : (sys ? [sys, ...newRest] : [...newRest])));
-    }
+  let compactions = 0;
+
+  /**
+   * Compact when the request would not fit — re-checked before EVERY model call,
+   * not once per turn.
+   *
+   * WHY PER STEP. A turn grows as it works: reading two source files adds a few
+   * thousand tokens, and the window a single request may use is the server's
+   * per-slot size. llama.cpp started with `-c 32768 -np 4` reports
+   * `default_generation_settings.n_ctx = 8192`, so a turn that fits at step 1 is
+   * over the limit by step 5. Measured with the real model on exactly that
+   * server: `request (8358 tokens) exceeds the available context size (8192)` —
+   * the turn died after reading the files and before writing anything, which is
+   * the "it won't make the changes" failure. The single pre-turn check could
+   * never have caught it. The plan keeps the recent exchange verbatim and never
+   * splits a tool result from its call; the originals stay in the session log.
+   */
+  async function compactIfNeeded(): Promise<AgentEvent | null> {
+    if (compaction === "off" || !opts.meter || compactions >= MAX_TURN_COMPACTIONS) return null;
+    const compacted = await maybeCompact({
+      messages, tools, meter: opts.meter, model: opts.model,
+      transport: opts.transport, signal: opts.signal, policy: compaction, approve: approveCompact,
+    });
+    if (!compacted.did) return null;
+    compactions += 1;
+    appendEvents(opts.sessionId ?? "", opts.workspace, [
+      { kind: "summary", data: { kind: "compaction", before: compacted.before, after: compacted.after, reason: compacted.reason } },
+    ]);
+    // Splice the compacted list back in.
+    const [sys] = messages;
+    const [newSys, ...newRest] = compacted.messages;
+    messages.length = 0;
+    messages.push(...(newSys ? [newSys, ...newRest] : (sys ? [sys, ...newRest] : [...newRest])));
+    return { type: "compaction", reason: compacted.reason, before: compacted.before, after: compacted.after, kept: compacted.kept };
   }
 
   /**
@@ -430,11 +501,26 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
   const delegateEvents: AgentEvent[] = [];
   /** Guards the one empty-answer retry per turn (see the empty-final branch). */
   let retriedEmpty = false;
+  /** How many times this turn was continued because the model only narrated. */
+  let actionNudges = 0;
+  /** Set once a mutating tool succeeds — after real work, narrating is not a stall. */
+  let mutatedThisTurn = false;
   /** Set for the retry so it is deterministic rather than another sample. */
   let temperatureOverride: number | undefined;
 
   for (let step = 0; step < maxSteps; step++) {
     yield { type: "step", index: step };
+
+    // Measure before every request: the transcript only grows while the turn
+    // works, and an over-window request is not a slow answer — it is a 400.
+    try {
+      const compactedNow = await compactIfNeeded();
+      if (compactedNow) yield compactedNow;
+    } catch (err) {
+      // Measuring or condensing is best-effort: a turn that cannot compact should
+      // still run (and report whatever the server says), not die here.
+      log.warn(`context check skipped: ${(err as Error).message}`);
+    }
 
     // Mid-turn steering: notes pushed while the previous step ran are drained
     // here and become a marked user message, so the model adapts course
@@ -510,10 +596,48 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
         yield { type: "step", index: step };
         continue;
       }
+      /**
+       * A plan is not an answer.
+       *
+       * This is the branch that ends every turn, so it is also where a model
+       * that announces its next tool call instead of making it gets caught: the
+       * user asked for a change, the model described the change, and the loop
+       * used to hand that back as the finished turn. Continue it instead, with
+       * a firm instruction and a hard bound, and only while no mutating tool has
+       * actually succeeded — after real work, prose is a legitimate answer.
+       */
+      if (
+        actionNudges < MAX_ACTION_NUDGES &&
+        step + 1 < maxSteps &&
+        !mutatedThisTurn &&
+        looksLikePlan(finalText)
+      ) {
+        actionNudges += 1;
+        appendEvents(opts.sessionId ?? "", opts.workspace, [
+          { kind: "message", data: { role: "assistant", preview: finalText.slice(0, 2000), steps: step + 1, plan_only: true } },
+        ]);
+        messages.push({
+          role: "user",
+          content:
+            actionNudges === 1
+              ? [
+                  "You described the next step instead of taking it. The turn is not over.",
+                  "Call the tool now, in this reply. Do not explain the plan again.",
+                  "If the work is genuinely finished and nothing needs to change, say so in one sentence — what you changed, or why no change is needed.",
+                ].join(" ")
+              : [
+                  "Still no tool call. Do the work in this reply: one call that makes the change.",
+                  "A further description of what you intend to do will be treated as your final answer and the turn will end with nothing changed.",
+                ].join(" "),
+        });
+        yield { type: "action_nudge", attempt: actionNudges };
+        yield { type: "step", index: step };
+        continue;
+      }
       appendEvents(opts.sessionId ?? "", opts.workspace, [
         { kind: "message", data: { role: "assistant", preview: finalText.slice(0, 2000), steps: step + 1 } },
       ]);
-      yield { type: "final", text: finalText, steps: step + 1 };
+      yield { type: "final", text: finalText, steps: step + 1, changed: mutatedThisTurn, nudges: actionNudges };
       return;
     }
 
@@ -561,7 +685,12 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
     }
     for (const call of mutatingCalls) {
       const evs = await runOneTool(call, "sequential");
-      for (const e of evs) yield e;
+      for (const e of evs) {
+        // A successful mutation means the model did the work; from here on a
+        // text-only answer is an answer, not a stall.
+        if (e.type === "tool_result" && e.ok) mutatedThisTurn = true;
+        yield e;
+      }
     }
     // delegation results produced during Promise.all
     while (delegateEvents.length) {
@@ -739,8 +868,41 @@ async function maybeCompact(input: {
   if (breakdown.remaining > 256) {
     return { did: false, messages: input.messages, reason: `within budget (${breakdown.used}/${window})`, before: 0, after: 0, kept: 0 };
   }
-  const plan = planCompaction(chatMessages, breakdown.used, window);
+  // Everything the breakdown attributes to something other than the conversation
+  // is fixed for this request: the system prompt and the tool schemas.
+  const fixedOverhead = breakdown.segments
+    .filter((s) => s.label !== "conversation")
+    .reduce((n, s) => n + s.tokens, 0);
+  const plan = planCompaction(chatMessages, breakdown.used, window, { fixedOverhead });
+
+  /**
+   * Nothing older to condense — the room has to come out of the tool output.
+   *
+   * This is the case that kept the real model from finishing a coding turn: one
+   * `read_file` of a 340-line component is ~3.4k tokens, more than an 8k-per-slot
+   * server leaves for the whole conversation once the system prompt and tool
+   * schemas are counted, and a single tool result can never be split off by the
+   * plan ("nothing could be condensed without splitting a recent turn"). Measured
+   * live as `request (8495 tokens) exceeds the available context size (8192)` with
+   * compaction already enabled.
+   */
   if (!plan.needed) {
+    const excess = breakdown.used - (window - 1024 /* reserveForReply */);
+    const elided = planResultElision(chatMessages, excess, { keepRecent: 1 });
+    if (elided.elided > 0) {
+      const trimmed: AgentMessage[] = elided.messages.map((m) => ({
+        role: m.role, content: typeof m.content === "string" ? m.content : null,
+        tool_calls: m.tool_calls as ToolCall[] | undefined, tool_call_id: m.tool_call_id, name: m.name,
+      }));
+      return {
+        did: true,
+        messages: trimmed,
+        reason: `elided ${elided.elided} oversized tool result(s), freeing ~${elided.freed} tokens`,
+        before: chatMessages.length,
+        after: trimmed.length,
+        kept: trimmed.length,
+      };
+    }
     return { did: false, messages: input.messages, reason: plan.reason, before: 0, after: 0, kept: 0 };
   }
   // 'ask' hands the choice to the UI; 'auto' just goes ahead.
@@ -753,18 +915,29 @@ async function maybeCompact(input: {
   // tool-calls. We just want the text reply and stop.
   const prompt = summarizationPrompt(plan.older, 768);
   let summary = "";
-  for await (const chunk of input.transport({
-    model: input.model,
-    messages: [
-      { role: "system", content: "You condense conversation transcripts into compact summaries. Follow the instructions in the user message exactly." },
-      { role: "user", content: prompt },
-    ],
-    tools: [],
-    stream: true,
-    signal: input.signal,
-  })) {
-    if (chunk.content) summary += chunk.content;
-    if (chunk.finishReason) break;
+  try {
+    for await (const chunk of input.transport({
+      model: input.model,
+      messages: [
+        { role: "system", content: "You condense conversation transcripts into compact summaries. Follow the instructions in the user message exactly." },
+        { role: "user", content: prompt },
+      ],
+      tools: [],
+      stream: true,
+      signal: input.signal,
+    })) {
+      if (chunk.content) summary += chunk.content;
+      if (chunk.finishReason) break;
+    }
+  } catch (e) {
+    // A failed summarisation is not a failed turn. Compaction is an optimisation
+    // of the request, and the model server can drop a connection for reasons that
+    // have nothing to do with this turn (observed: the user restarted
+    // llama-server while a turn was mid-compaction). Letting that exception
+    // escape killed the whole run with a stack trace instead of an answer, so it
+    // is reported as "nothing was condensed" and the turn carries on.
+    log.warn(`compaction summarisation failed: ${(e as Error).message}`);
+    return { did: false, messages: input.messages, reason: `summarisation failed: ${(e as Error).message}`.slice(0, 160), before: 0, after: 0, kept: 0 };
   }
   summary = summary.trim();
   if (!summary) {
@@ -773,7 +946,7 @@ async function maybeCompact(input: {
 
   const newChat = applyCompaction(summary, plan.recent);
   const before = chatMessages.length;
-  const after = newChat.length;
+  let after = newChat.length;
   // Convert back to AgentMessage (content may be string, not null)
   const newMessages: AgentMessage[] = newChat.map((m) => ({
     role: m.role,
@@ -782,5 +955,27 @@ async function maybeCompact(input: {
     tool_call_id: m.tool_call_id,
     name: m.name,
   }));
+  // Condensing the older turns is not always enough: one oversized result in the
+  // kept part can still put the request over the window, so measure once more and
+  // take the rest from the oldest tool output.
+  try {
+    const afterBreak = await measureContext(input.meter, newChat, input.tools);
+    const trim = planResultElision(newChat, afterBreak.used - (window - 1024), { keepRecent: 1 });
+    if (trim.elided > 0) {
+      after = trim.messages.length;
+      const trimmed: AgentMessage[] = trim.messages.map((m) => ({
+        role: m.role, content: typeof m.content === "string" ? m.content : null,
+        tool_calls: m.tool_calls as ToolCall[] | undefined, tool_call_id: m.tool_call_id, name: m.name,
+      }));
+      return {
+        did: true,
+        messages: trimmed,
+        reason: `${plan.reason} + elided ${trim.elided} oversized result(s)`,
+        before, after, kept: trimmed.length,
+      };
+    }
+  } catch {
+    /* keep the condensed list; the loop reports whatever the server says */
+  }
   return { did: true, messages: newMessages, reason: plan.reason, before, after, kept: plan.recent.length };
 }

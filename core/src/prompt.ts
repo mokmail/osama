@@ -193,6 +193,12 @@ export function orchestrationRules(): string {
     "- Tool results are authoritative: if a result contradicts your plan, adapt — never claim a step succeeded without a result showing it.",
     "- Before saying a task is done, re-check it against every requirement; if verification is cheap (reading back a file you wrote, recomputing a number), do it.",
     "- If a tool fails, change the approach rather than repeating the same call.",
+    // Observed: asked to change a stylesheet, a quantized coding model read two
+    // files and then answered "Now I'll look at the index.css file to see the
+    // current padding styles:" — the turn ended, nothing was changed. The rule
+    // names the failure shape so the model can recognise itself doing it.
+    "- Never end a turn on a plan. If your reply is about to say what you are going to do ('I'll read …', 'Now let me check …', 'Next, I will update …'), make that tool call in the same reply — an announcement without the call ends the turn and leaves the user with nothing.",
+    "- A request to change files is finished only when a writing tool has run and you have said what changed. Reading the files is preparation, not the task.",
     // Observed failure that motivates these two: a small model asked to "read
     // the first page" invented `https://www.example.com`, called read_file on
     // that URL as a path, then repeated the identical failing call. The rule

@@ -354,7 +354,7 @@ export function MemoryModal() {
       <div className="wspick-custom">
         <input
           className="input"
-          placeholder={draftTarget === "user" ? "e.g. prefers terse answers, no motivational closings" : "e.g. the NUC is reached over ssh as kmail@192.168.1.57"}
+          placeholder={draftTarget === "user" ? "e.g. prefers terse answers, no motivational closings" : "e.g. the build box is reached over ssh at dev@192.168.1.20"}
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => {

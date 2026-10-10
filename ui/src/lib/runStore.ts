@@ -33,6 +33,10 @@ export interface ChatMessage {
   attachments?: Array<{ id: string; name: string; kind: "text" | "image"; mime: string; size: number; text?: string; dataUrl?: string }>;
   steps?: AgentStep[];
   stepCount?: number;
+  /** Times this turn had to be asked to act instead of narrating. */
+  nudges?: number;
+  /** Whether any mutating tool succeeded in this turn. */
+  changed?: boolean;
   /** A thinking model's chain-of-thought, when the provider streams one
    *  (Ollama). Shown muted, separate from the final answer. */
   reasoning?: string;
@@ -51,6 +55,8 @@ export interface RunStatus {
   elapsedMs: number;
   /** Set when a turn ended in an error. */
   error: string | null;
+  /** What the harness is doing about a narrating model, while it does it. */
+  notice: string | null;
   /** True when the run is running but this page is not the one watching it. */
   detached: boolean;
 }
@@ -133,7 +139,7 @@ const subscribers = new Set<(s: ChatState) => void>();
 let runStartedAt = 0;
 
 function emptyStatus(): RunStatus {
-  return { running: false, waiting: null, runId: null, steps: 0, elapsedMs: 0, error: null, detached: false };
+  return { running: false, waiting: null, runId: null, steps: 0, elapsedMs: 0, error: null, detached: false, notice: null };
 }
 
 export function getChatState(): ChatState {
@@ -251,7 +257,7 @@ export function startRun(req: RunRequest): void {
   set({
     startedAt: runStartedAt,
     messages: [...req.history, assistant],
-    status: { running: true, waiting: null, runId: req.runId, steps: 0, elapsedMs: 0, error: null, detached: false },
+    status: { running: true, waiting: null, runId: req.runId, steps: 0, elapsedMs: 0, error: null, detached: false, notice: null },
     prompt: null,
     todos: [],
     approval: null,
@@ -455,10 +461,14 @@ async function consume(req: RunRequest, ac: AbortController): Promise<void> {
         setStatus({ waiting: "approval" });
         break;
 
+      case "action_nudge":
+        setStatus({ notice: "the model described the next step instead of making it — asking it to continue" });
+        break;
+
       case "final":
         acc = ev.text || acc;
-        patchLast((m) => ({ ...m, content: acc, stepCount: ev.steps }));
-        setStatus({ waiting: null });
+        patchLast((m) => ({ ...m, content: acc, stepCount: ev.steps, nudges: ev.nudges, changed: ev.changed }));
+        setStatus({ waiting: null, notice: null });
         break;
 
       case "error":
@@ -485,7 +495,7 @@ function finish(outcome: "done" | "error" | "cancelled"): void {
     startedAt: 0,
     approval: null,
     question: null,
-    status: { running: false, waiting: null, runId: null, steps: state.status.steps, elapsedMs: 0, error: outcome === "done" ? null : state.status.error, detached: false },
+    status: { running: false, waiting: null, runId: null, steps: state.status.steps, elapsedMs: 0, error: outcome === "done" ? null : state.status.error, detached: false, notice: null },
   });
 }
 
@@ -631,7 +641,7 @@ export async function attachToRun(runId: string): Promise<boolean> {
             set({ lastCompaction: { at: Date.now(), before: ev.before, after: ev.after, reason: ev.reason } });
           } else if (ev.type === "final") {
             acc = ev.text || acc;
-            patchLast((m) => ({ ...m, content: acc, stepCount: ev.steps }));
+            patchLast((m) => ({ ...m, content: acc, stepCount: ev.steps, nudges: ev.nudges, changed: ev.changed }));
             setStatus({ waiting: null });
           } else if (ev.type === "prompt") {
             set({ prompt: { sections: ev.sections, chars: ev.chars, personality: ev.personality, memory: ev.memory } });

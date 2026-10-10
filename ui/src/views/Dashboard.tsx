@@ -2,8 +2,8 @@ import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import {
   Boxes, Cpu, Download, Gauge, HardDrive, MessagesSquare, Server as ServerIcon, Terminal, Wrench,
 } from "lucide-react";
-import { api } from "../lib/api";
-import type { ServerMetrics, SeriesSample, StatsSnapshot, SystemResponse } from "../lib/types";
+import { agentApi, api } from "../lib/api";
+import type { AgentStats, ServerMetrics, SeriesSample, StatsSnapshot, SystemResponse } from "../lib/types";
 import { Badge, Button, Card, CardHead, Console, usePoll } from "../components/ui";
 import { bytes, compactTokens, num, rate, sinceNow, timeAgo, uptime } from "../lib/format";
 import type { EventBus } from "../App";
@@ -19,6 +19,10 @@ export function Dashboard({ system, bus, onNavigate }: { system: SystemResponse 
   const [stats, setStats] = useState<StatsSnapshot | null>(null);
   const [series, setSeries] = useState<SeriesSample[]>([]);
   const [metrics, setMetrics] = useState<ServerMetrics | null>(null);
+  // The agent harness is counted separately from the llama.cpp engine. Both
+  // halves have a "tool" count and they are different things, so the dashboard
+  // labels them apart instead of showing one ambiguous number.
+  const [agent, setAgent] = useState<AgentStats | null>(null);
 
   const serverProc = stats?.processes.runningNow.find((p) => p.tool.includes("llama-server"));
   const serverUrl = serverProc?.url;
@@ -37,7 +41,14 @@ export function Dashboard({ system, bus, onNavigate }: { system: SystemResponse 
     else setMetrics(null);
   };
 
+  const refreshAgent = () => {
+    agentApi.stats().then(setAgent).catch(() => {});
+  };
+
   usePoll(refresh, POLL_MS, [serverUrl]);
+  // The harness inventory only moves when a skill, memory entry, job or MCP
+  // server is added — it does not need the live 3 s cadence.
+  usePoll(refreshAgent, 15_000);
   useEffect(() => {
     refresh();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -71,6 +82,10 @@ export function Dashboard({ system, bus, onNavigate }: { system: SystemResponse 
         <ServingStrip model={servedModel} url={serverUrl} metrics={metrics} />
 
         <HeadlineRow stats={stats} metrics={metrics} />
+
+        <Section title="Agent" note="the local agent harness — what the model may call, counted apart from the llama.cpp binaries">
+          <AgentPanels stats={agent} />
+        </Section>
 
         <Section title="Engine" note="the llama.cpp build Osama drives">
           <EnginePanels stats={stats} />
@@ -265,8 +280,17 @@ function HeadlineRow({ stats, metrics }: { stats: StatsSnapshot | null; metrics:
         />
         <Figure
           value={s ? String(s.engine.tools) : "—"}
-          label="Tools"
-          sub={s ? <><span>{s.engine.tag ?? "no build"}</span> · {bytes(s.engine.sizeBytes)}</> : undefined}
+          label="llama.cpp tools"
+          sub={
+            s
+              ? (
+                  <>
+                    <span>{s.engine.frontEndsPresent ?? s.engine.tools} of {s.engine.frontEndsTotal ?? s.engine.knownTools} drivable</span>
+                    {" · "}{s.engine.tag ?? "no build"}
+                  </>
+                )
+              : undefined
+          }
         />
         <Figure
           value={metrics?.up ? "up" : "—"}
@@ -314,19 +338,30 @@ function EnginePanels({ stats }: { stats: StatsSnapshot | null }) {
           <dt>Tag</dt><dd className="mono">{e?.tag ?? "—"}</dd>
           <dt>Acceleration</dt><dd>{e?.acceleration ? <Badge kind="accent">{e.acceleration}</Badge> : "—"}</dd>
           <dt>Installed</dt><dd>{e?.installedAt ? timeAgo(e.installedAt) : "—"}</dd>
-          <dt>Binaries</dt><dd>{e?.tools ?? 0} of {e?.knownTools ?? 0} known tools</dd>
+          <dt>Binaries</dt><dd>{e?.tools ?? 0} of {e?.knownTools ?? 0} shipped by this build</dd>
+          <dt>Drivable</dt><dd>{e?.frontEndsTotal ? `${e.frontEndsPresent ?? 0} of ${e.frontEndsTotal}` : "—"} front-ends in the Tools views</dd>
           <dt>On disk</dt><dd>{bytes(e?.sizeBytes ?? 0)}</dd>
           <dt>Builds</dt><dd>{e?.enginesInstalled ?? 0} side-by-side</dd>
         </dl>
       </Panel>
 
-      <Panel title="Tool coverage" right={<span className="faint mono small">{e?.tools ?? 0}/{e?.knownTools ?? 0}</span>}>
+      <Panel title="Tool coverage" right={<span className="faint mono small">{e?.tools ?? 0}/{e?.knownTools ?? 0} shipped</span>}>
         {e && e.toolNames.length > 0 ? (
-          <div className="row wrap" style={{ gap: 6 }}>
-            {e.toolNames.map((t) => (
-              <Badge key={t}>{t.replace(/^llama-/, "")}</Badge>
-            ))}
-          </div>
+          <>
+            <div className="row wrap" style={{ gap: 6 }}>
+              {e.toolNames.map((t) => (
+                <Badge key={t}>{t.replace(/^llama-/, "")}</Badge>
+              ))}
+            </div>
+            <div className="hr" />
+            <div className="muted small">
+              {e.frontEndsPresent ?? 0} of {e.frontEndsTotal ?? 0} can be driven from the Tools views. These are the
+              engine's binaries — the tools the <em>model</em> may call are counted in the Agent section.
+              {(e.missingTools?.length ?? 0) > 0 && (
+                <> This build ships no <span className="mono">{e.missingTools.map((t) => t.replace(/^llama-/, "")).join(", ")}</span>.</>
+              )}
+            </div>
+          </>
         ) : (
           <div className="muted small">Install a llama.cpp build to resolve the tool binaries.</div>
         )}
@@ -602,6 +637,74 @@ function MachinePanels({
           <dt>Partial</dt><dd>{bytes(d?.partialBytes ?? 0)} <span className="faint">({d?.partialFiles ?? 0})</span></dd>
           <dt>Volume free</dt><dd>{volume ? bytes(volume.freeBytes) : "—"}</dd>
         </dl>
+      </Panel>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------- agent */
+
+/**
+ * The agent half of the app, rendered next to — and deliberately unlike — the
+ * engine half.
+ *
+ * Every "tool" number on this page means something different, so the labels say
+ * which one it is: the Engine section counts llama.cpp binaries on disk, this
+ * counts the JSON schemas the model is handed on every agent turn.
+ */
+function AgentPanels({ stats }: { stats: AgentStats | null }) {
+  const nav = useNav();
+  if (!stats) {
+    return (
+      <div className="panel">
+        <div className="panel-head">
+          <h3>Agent harness</h3>
+        </div>
+        <div className="muted small">
+          reading the agent harness… if this never resolves, the running engine is older than this
+          UI — restart Osama.
+        </div>
+      </div>
+    );
+  }
+  const t = stats.tools;
+  const mem = stats.memory;
+  return (
+    <div className="panel-grid">
+      <Panel title="Agent tools" right={<span className="faint mono small">{t.total} the model may call</span>}>
+        <div className="figures compact">
+          <Figure value={String(t.builtIn)} label="built in" sub={<span>{t.mutating} can change files</span>} />
+          <Figure value={String(t.readOnly)} label="read only" sub={<span>never touch state</span>} />
+          <Figure
+            value={String(t.mcp)}
+            label="from MCP"
+            sub={
+              stats.mcp.servers > 0
+                ? <span>{stats.mcp.connected} of {stats.mcp.servers} server(s) connected</span>
+                : <span className="faint">no server configured</span>
+            }
+          />
+        </div>
+        <div className="hr" />
+        <div className="muted small">
+          Each of these is a schema sent with every agent turn, so they occupy context even when
+          unused. Switch the chat header to <span className="mono">Agent</span> to put them to work.
+        </div>
+      </Panel>
+
+      <Panel title="Harness state" right={<Badge>{stats.workspace.chosen ? "workspace set" : "default workspace"}</Badge>}>
+        <dl className="kv">
+          <dt>Workspace</dt><dd className="mono small" title={stats.workspace.path}>{stats.workspace.path}</dd>
+          <dt>Skills</dt><dd>{stats.skills.total} installed <span className="faint">· {stats.skills.roots} search root(s)</span></dd>
+          <dt>Memory</dt><dd>{mem.entries} entries <span className="faint">· {mem.used} / {mem.budget} chars ({mem.percent}%)</span></dd>
+          <dt>Scheduled jobs</dt><dd>{stats.jobs.total} <span className="faint">· {stats.jobs.enabled} enabled</span></dd>
+          <dt>Sessions</dt><dd>{stats.sessions.total} logged{stats.sessions.last ? <span className="faint"> · last {timeAgo(stats.sessions.last)}</span> : null}</dd>
+        </dl>
+        <div className="hr" />
+        <div className="row" style={{ gap: 9 }}>
+          <Button size="sm" variant="ghost" onClick={() => nav("chat")}>Open agent chat</Button>
+          <Button size="sm" variant="ghost" onClick={() => nav("mcp")}>MCP servers</Button>
+        </div>
       </Panel>
     </div>
   );

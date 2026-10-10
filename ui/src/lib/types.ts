@@ -96,11 +96,17 @@ export interface ParamSpec {
   help?: string;
   group: string;
   default?: string | number | boolean;
+  /** Sample value shown as the placeholder. Never changes what runs. */
+  example?: string;
   enum?: string[];
+  /** Per-option explanation for enum pickers, keyed by option value. */
+  enumHelp?: Record<string, string>;
   positional?: boolean;
   order?: number;
   unit?: string;
   advanced?: boolean;
+  /** the tool cannot run without it */
+  required?: boolean;
 }
 
 export interface ToolSpec {
@@ -108,6 +114,8 @@ export interface ToolSpec {
   binary: string;
   title: string;
   summary: string;
+  /** How the tool works — what the inputs are for. Rendered above the form. */
+  notes?: string[];
   group: string;
   mode: "process" | "oneshot";
   params: ParamSpec[];
@@ -236,6 +244,11 @@ export interface StatsSnapshot {
     tools: number;
     toolNames: string[];
     knownTools: number;
+    /** KNOWN_TOOLS entries this build does not ship. */
+    missingTools: string[];
+    /** Command-catalogue front-ends that resolved, out of frontEndsTotal. */
+    frontEndsPresent: number;
+    frontEndsTotal: number;
     enginesInstalled: number;
     sizeBytes: number;
   };
@@ -420,6 +433,34 @@ export interface AgentToolsResponse {
   workspace: string;
 }
 
+/**
+ * The agent harness in one object, for the Dashboard's Agent section.
+ *
+ * Kept separate from StatsSnapshot on purpose: `engine.tools` there counts
+ * llama.cpp binaries on disk, while `tools.total` here counts the JSON schemas
+ * the model is handed. Two different numbers that used to look like one.
+ */
+export interface AgentStats {
+  tools: {
+    /** Built-ins in core/src/tools.ts. */
+    builtIn: number;
+    /** Built-ins that mutate state and are gated by the approval policy. */
+    mutating: number;
+    /** Built-ins that only read. */
+    readOnly: number;
+    /** Live tools advertised by connected MCP servers. */
+    mcp: number;
+    /** builtIn + mcp: what the model can actually call right now. */
+    total: number;
+  };
+  skills: { total: number; roots: number };
+  memory: { entries: number; used: number; budget: number; percent: number };
+  sessions: { total: number; last: string | null };
+  jobs: { total: number; enabled: number };
+  mcp: { servers: number; connected: number; tools: number };
+  workspace: { path: string; chosen: boolean };
+}
+
 /** Events streamed by POST /api/agent, one per line of SSE. */
 export type AgentEvent =
   | { type: "assistant_delta"; text: string }
@@ -437,7 +478,9 @@ export type AgentEvent =
   | { type: "todos"; todos: TodoItem[] }
   | { type: "approval_request"; id: string; command: string; cwd: string; timeoutMs: number }
   | { type: "question"; id: string; question: string; options?: string[]; timeoutMs: number }
-  | { type: "final"; text: string; steps: number }
+  /** The model narrated a step instead of calling it, so the turn continued. */
+  | { type: "action_nudge"; attempt: number }
+  | { type: "final"; text: string; steps: number; changed?: boolean; nudges?: number }
   | { type: "error"; message: string };
 
 /** One entry of the visible agent trace attached to an assistant message. */
@@ -519,13 +562,36 @@ export interface BrowseEntry {
   name: string;
   path: string;
   hidden: boolean;
+  /** true for a file — only present when the request asked for extensions. */
+  file?: boolean;
+  size?: number;
 }
 
 export interface BrowseResponse {
   path: string;
   parent: string | null;
   home: string | null;
+  /** shortcut roots the pickers offer */
+  modelsDir: string | null;
+  workspace: string | null;
   entries: BrowseEntry[];
+}
+
+/** A GGUF found on disk by the picker's search. */
+export interface GgufHit {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  inLibrary: boolean;
+}
+
+export interface FindGgufResponse {
+  ok: boolean;
+  dir?: string;
+  files?: GgufHit[];
+  /** the walk hit its bound — there may be more below */
+  truncated?: boolean;
+  error?: string;
 }
 
 /** A skill found in a remote repo, before installing. */

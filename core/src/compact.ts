@@ -27,6 +27,14 @@ export interface CompactOptions {
   reserveForReply?: number;
   /** Rough ceiling on the summary itself. */
   maxSummaryTokens?: number;
+  /**
+   * Tokens that no amount of condensing can remove: the system prompt and the
+   * tool schemas. The "keep this much conversation" target is derived from what
+   * is LEFT of the window after these, or the plan keeps a share of the whole
+   * window and every request stays over it — 5.2k of schemas + system on an 8k
+   * server leaves ~1.7k for the conversation, not 3k.
+   */
+  fixedOverhead?: number;
   /** Never summarise away more than this share of the window in one pass. */
   maxCompactionShare?: number;
   /**
@@ -61,12 +69,29 @@ export function planCompaction(
   const sizeOf = o.sizeOf ?? estimate;
   const trigger = windowTokens - o.reserveForReply;
 
-  // Prefer the caller's measured total (it includes template overhead); fall
-  // back to summing the messages. Whichever is used, sanity-check it against the
-  // per-message sum so the two cannot silently diverge.
-  const summed = messages.reduce((n, m) => n + sizeOf(m), 0);
+  // Prefer the caller's measured total — it includes the chat-template overhead
+  // AND the tool schemas, which are not messages at all — with the per-message
+  // sum as the fallback.
+  //
+  // A measurement is legitimately LARGER than the message sum: the 37 built-in
+  // tool schemas cost ~3.5k tokens that no message contains. Treating
+  // "measured > 2× the sum" as an inconsistent meter made the plan fall back to
+  // the smaller sum, so on a real 8k-per-slot server (llama.cpp `-c 32768 -np 4`
+  // reports `default_generation_settings.n_ctx = 8192`) a request that had
+  // already blown the window looked "within budget" — compaction never fired and
+  // the turn died on the server's 400 after reading the files and before writing
+  // anything. Only a measurement SMALLER than the content it measured is
+  // suspicious, so that is the only case that falls back now.
+  // The system prompt is the agent's instructions, not conversation: it is held
+  // out of the split entirely and always kept verbatim. Letting the walk-back
+  // include it meant a condensation could summarise the agent's own rules away —
+  // which is worse than the overflow it was trying to fix.
+  const head = messages[0]?.role === "system" ? messages[0] : null;
+  const body = head ? messages.slice(1) : messages;
+
+  const summed = body.reduce((n, m) => n + sizeOf(m), 0);
   const measured = usedTokens ?? summed;
-  const inconsistent = usedTokens != null && summed > 0 && (measured < summed * 0.5 || measured > summed * 2);
+  const inconsistent = usedTokens != null && summed > 0 && usedTokens < summed * 0.5;
   const used = inconsistent ? summed : measured;
 
   if (used < trigger) {
@@ -74,30 +99,45 @@ export function planCompaction(
   }
 
   // Walk backwards, keeping messages until the kept part fits the target.
-  const keepGoal = Math.max(
-    Math.floor(windowTokens * (1 - o.maxCompactionShare)) + o.reserveForReply,
-    o.reserveForReply, // never aim to keep less than the reply needs
-  );
+  //
+  // The share of the window is an upper bound; what actually fits is whatever is
+  // left after the fixed overhead (system prompt + tool schemas) and the reply's
+  // reserve. Without the overhead term the target is unreachable on a small
+  // per-slot window and the plan condenses nothing, forever.
+  const shareGoal = Math.floor(windowTokens * (1 - o.maxCompactionShare)) + o.reserveForReply;
+  const fitsGoal = windowTokens - (o.fixedOverhead ?? 0) - o.reserveForReply;
+  const keepGoal = Math.max(o.reserveForReply, Math.min(shareGoal, fitsGoal));
   let kept = 0;
-  let cutIndex = messages.length;
+  let cutIndex = body.length;
 
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i]!;
-    // A tool result must stay with the assistant turn that requested it.
+  for (let i = body.length - 1; i >= 0; i--) {
+    const m = body[i]!;
+    // A tool result is never cut on its own — it travels with the assistant turn
+    // that requested it — so it is counted THERE, not here.
     if (m.role === "tool") continue;
-    const size = sizeOf(m);
+    let size = sizeOf(m);
+    if (Array.isArray(m.tool_calls) && m.tool_calls.length) {
+      // Count the results this call produced. Skipping them made the walk-back
+      // believe the recent part was tiny while in fact the tool OUTPUT was what
+      // filled the window: a turn that read three files reported
+      // "nothing could be condensed", so nothing ever was, and the next request
+      // died over the window on the real server. Tool output is the biggest
+      // thing a coding turn adds, so it has to weigh in the split.
+      for (let j = i + 1; j < body.length && body[j]?.role === "tool"; j++) size += sizeOf(body[j]!);
+    }
     if (kept > 0 && kept + size > keepGoal) break;
     kept += size;
     cutIndex = i;
   }
 
   // If a tool result sits at the cut, move back so its call comes with it.
-  while (cutIndex > 0 && messages[cutIndex]?.role === "tool") cutIndex--;
+  while (cutIndex > 0 && body[cutIndex]?.role === "tool") cutIndex--;
   // Always leave something to talk about.
-  if (cutIndex >= messages.length) cutIndex = Math.max(0, messages.length - 1);
+  if (cutIndex >= body.length) cutIndex = Math.max(0, body.length - 1);
 
-  const older = messages.slice(0, cutIndex);
-  const recent = messages.slice(cutIndex);
+  const older = body.slice(0, cutIndex);
+  // The held-out system prompt always goes back in front of the kept part.
+  const recent = head ? [head, ...body.slice(cutIndex)] : body.slice(cutIndex);
 
   if (!older.length) {
     return {
@@ -138,6 +178,70 @@ export function summarizationPrompt(older: ChatMessage[], maxTokens: number): st
     transcript,
     "</conversation>",
   ].join("\n");
+}
+
+/**
+ * Elide oversized tool output when nothing else can free enough room.
+ *
+ * The last resort, and the one that actually unblocks a coding turn: a single
+ * `read_file` of a 340-line component can be ~3.4k tokens, which on a server
+ * whose per-request window is 8k (llama.cpp `-c 32768 -np 4`) is more than the
+ * conversation is allowed to hold — and a lone tool result can never be split
+ * off by the plan, so condensing "older turns" frees nothing. Measured live:
+ * `request (8495 tokens) exceeds the available context size (8192)` with
+ * compaction already enabled.
+ *
+ * The newest results are kept verbatim (the model is working from them), the
+ * oldest are replaced with a notice that says what happened and how to get the
+ * content back, so nothing is lost silently.
+ */
+export function planResultElision(
+  messages: ChatMessage[],
+  excessTokens: number,
+  opts: { keepRecent?: number } = {},
+): { messages: ChatMessage[]; elided: number; freed: number } {
+  if (excessTokens <= 0) return { messages, elided: 0, freed: 0 };
+  const keepRecent = Math.max(0, opts.keepRecent ?? 1);
+  // Pass 1 keeps the newest results (the model is working from them). If that
+  // still does not free enough — the newest result is itself the oversized one,
+  // which is the common case for a single big file read — pass 2 gives up the
+  // newest as well rather than letting the request go over the window and die.
+  const pass1 = elideFrom(messages, excessTokens, keepRecent);
+  if (pass1.freed >= excessTokens || keepRecent === 0) return pass1;
+  const pass2 = elideFrom(pass1.messages, excessTokens - pass1.freed, 0);
+  return { messages: pass2.messages, elided: pass1.elided + pass2.elided, freed: pass1.freed + pass2.freed };
+}
+
+/** One elision pass: replace the oldest oversized tool output, keeping the last N. */
+function elideFrom(
+  messages: ChatMessage[],
+  excessTokens: number,
+  keepRecent: number,
+): { messages: ChatMessage[]; elided: number; freed: number } {
+  if (excessTokens <= 0) return { messages, elided: 0, freed: 0 };
+  const toolIndexes = messages.map((m, i) => (m.role === "tool" ? i : -1)).filter((i) => i >= 0);
+  // `slice(-0)` is `slice(0)` — the whole array — so 0 has to be special-cased or
+  // "protect nothing" protects everything and the elision never fires.
+  const keep = keepRecent > 0 ? new Set(toolIndexes.slice(-keepRecent)) : new Set<number>();
+  const out = messages.map((m) => ({ ...m }));
+  let freed = 0;
+  let elided = 0;
+  // Oldest first: the most recent output is what the model is reasoning about.
+  for (const i of toolIndexes) {
+    if (freed >= excessTokens) break;
+    if (keep.has(i)) continue;
+    const m = out[i]!;
+    const body = typeof m.content === "string" ? m.content : JSON.stringify(m.content ?? "");
+    if (!body || body.startsWith("[output elided")) continue;
+    const size = estimate(m);   // the same per-message measure the plan uses
+    out[i] = {
+      ...m,
+      content: `[output elided: ${size} tokens from ${m.name ?? "a tool"} — re-run it, or read just the range you need, if this is still required]`,
+    };
+    freed += size;
+    elided += 1;
+  }
+  return { messages: out, elided, freed };
 }
 
 /** Build the message list the model sees after a compaction. */

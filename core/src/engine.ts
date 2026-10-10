@@ -18,29 +18,53 @@ const log = logger("engine");
 
 const GITHUB_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
 
-/** The tools Osama knows how to drive. Mirrors llama.cpp's `tools/` tree. */
-export const KNOWN_TOOLS = [
+/**
+ * The front-ends Osama's command catalogue can build an argv for. A missing
+ * entry here is a real problem: the Tools views have nothing to run.
+ */
+export const DRIVEN_TOOLS = [
   "llama-cli",
+  "llama-completion",
   "llama-server",
-  "llama-quantize",
-  "llama-bench",
   "llama-mtmd-cli",
-  "llama-perplexity",
+  "llama-tts",
+  "llama-quantize",
   "llama-imatrix",
   "llama-gguf-split",
-  "llama-gguf-hash",
-  "llama-tokenize",
-  "llama-embedding",
-  "llama-fit-params",
+  "llama-bench",
   "llama-batched-bench",
-  "llama-results",
-  "llama-tts",
+  "llama-perplexity",
+  "llama-tokenize",
+  "llama-fit-params",
   "llama-export-lora",
-  "llama-gguf",
   "ggml-rpc-server",
-  // Shipped by the official build and declared as a tool in commands.ts; it was
-  // missing here, so "Run CLI → Completion" could never resolve its binary.
-  "llama-completion",
+] as const;
+
+/** Shipped by a release, but not (yet) driven from a Tools view. */
+export const EXTRA_TOOLS = [
+  "llama", // the unified front-end: `llama serve | cli | download | version`
+  "llama-results",
+  "llama-cvector-generator",
+  "llama-mtmd-debug",
+  "llama-gemma3-cli",
+  "llama-llava-cli",
+  "llama-minicpmv-cli",
+  "llama-qwen2vl-cli",
+  "ggml-metal-tuning",
+] as const;
+
+/**
+ * Every tool binary a release ships — the inventory coverage is counted against.
+ *
+ * It must mirror the *current* release. A name upstream has dropped reads as a
+ * permanently missing binary, which is exactly what a healthy build used to
+ * report: `llama-embedding`, `llama-gguf` and `llama-gguf-hash` are gone, while
+ * the per-model CLIs and the unified `llama` front-end never made the list — so
+ * the dashboard showed "16 of 19" for a build that was complete.
+ */
+export const KNOWN_TOOLS = [
+  ...DRIVEN_TOOLS,
+  ...EXTRA_TOOLS,
 ] as const;
 
 export type ToolName = (typeof KNOWN_TOOLS)[number] | string;
@@ -129,16 +153,15 @@ function writeRegistry(reg: Registry): void {
 }
 
 export function listInstalled(): InstalledEngine[] {
+  reconcileAll();
   return readRegistry().engines;
 }
 
 export function getActiveEngine(): InstalledEngine | undefined {
   const reg = readRegistry();
-  if (reg.activeTag) {
-    const found = reg.engines.find((e) => e.tag === reg.activeTag);
-    if (found) return found;
-  }
-  return reg.engines[0];
+  const engine = pickEngine(reg, reg.activeTag);
+  if (engine) reconcile(engine);
+  return pickEngine(readRegistry(), engine?.tag);
 }
 
 export function setActiveEngine(tag: string): void {
@@ -196,6 +219,68 @@ function discoverTools(dir: string, osName: Os): Record<string, string> {
     if (rpc[0]) tools["ggml-rpc-server"] = rpc[0];
   }
   return tools;
+}
+
+/* ------------------------------------------------------------------ rescan */
+
+/**
+ * Tool maps go stale, because they are written once.
+ *
+ * `installEngine` discovers the binaries a single time and stores the result in
+ * registry.json; nothing re-reads the directory afterwards. A later release that
+ * adds or drops a binary therefore keeps the old map forever, and the dashboard
+ * counts coverage against a set the build never had. An engine dir walk is one
+ * directory listing, so it is reconciled lazily — at most once per process per
+ * tag — rather than on every read.
+ */
+const reconciled = new Set<string>();
+
+function pickEngine(reg: Registry, tag?: string): InstalledEngine | undefined {
+  if (tag) {
+    const found = reg.engines.find((e) => e.tag === tag);
+    if (found) return found;
+  }
+  return reg.engines[0];
+}
+
+function reconcile(engine: InstalledEngine): void {
+  if (reconciled.has(engine.tag)) return;
+  reconciled.add(engine.tag);
+  try {
+    refreshEngineTools(engine.tag);
+  } catch (err) {
+    // Keep the stored map: a scan that fails must not report a build as untooled.
+    log.warn(`tool rescan failed for ${engine.tag}: ${(err as Error).message}`);
+  }
+}
+
+function reconcileAll(): void {
+  for (const e of readRegistry().engines) reconcile(e);
+}
+
+/**
+ * Re-scan one installed build and persist its tool map if it moved.
+ * Returns what changed, so a caller can report it instead of leaving a stale
+ * count on screen (the dashboard's "N of M binaries" reads from here).
+ */
+export function refreshEngineTools(tag?: string): { tag?: string; added: string[]; removed: string[] } {
+  const reg = readRegistry();
+  const engine = tag ? reg.engines.find((e) => e.tag === tag) : pickEngine(reg, reg.activeTag);
+  if (!engine || !fs.existsSync(engine.dir)) return { added: [], removed: [] };
+  const found = discoverTools(engine.dir, engine.os);
+  const names = Object.keys(found);
+  // An empty result means the dir is unreadable or still extracting; never
+  // overwrite a good map with nothing.
+  if (names.length === 0) return { tag: engine.tag, added: [], removed: [] };
+  const added = names.filter((n) => !engine.tools[n]);
+  const removed = Object.keys(engine.tools).filter((n) => !found[n]);
+  const before = JSON.stringify(engine.tools);
+  engine.tools = found;
+  if (JSON.stringify(found) !== before) {
+    writeRegistry(reg);
+    log.info(`rescanned ${engine.tag}: ${names.length} binaries (+${added.length} / -${removed.length})`);
+  }
+  return { tag: engine.tag, added, removed };
 }
 
 function chmodExecutables(dir: string, osName: Os): void {

@@ -160,7 +160,7 @@ See [Headless CLI](#headless-cli) for the full command set.
 
 | Group | View | What it does |
 |---|---|---|
-| **Start** | Dashboard | Live stats: library totals, engines, machine, activity, sparklines |
+| **Start** | Dashboard | Live stats: agent harness (tools, skills, memory, jobs, MCP) beside the llama.cpp engine, library, machine and activity |
 | | Chat | Plain chat by default, with an explicit **Chat / Agent** switch and a sidebar for history, context and settings |
 | | Artifacts | Everything the agent wrote: files, their folders, and a jailed folder browser |
 | **Models** | Library | Local GGUF models — scan, add, remove, inspect cards |
@@ -181,9 +181,11 @@ view directly, and reload returns you there.
 
 ### The llama.cpp tools
 
-Osama exposes all fourteen binaries the release ships, each generated from one
+Osama drives **fifteen** binaries from the Tools views, each generated from one
 catalogue (`core/src/commands.ts`) so adding a flag to the catalogue adds it to
-the GUI:
+the GUI. The release itself ships more than that (per-model CLIs, the unified
+`llama` front-end, `ggml-metal-tuning`); the dashboard counts coverage against
+the whole shipped set and reports how many of them are drivable:
 
 | Tool | Binary | Title |
 |---|---|---|
@@ -200,7 +202,30 @@ the GUI:
 | Completion | `llama-completion` | Raw completion |
 | Fit parameters | `llama-fit-params` | Find parameters that fit your memory |
 | Text to speech | `llama-tts` | Speech synthesis |
-| RPC server | `rpc-server` | Distribute layers over the network |
+| Merge LoRA | `llama-export-lora` | Fold an adapter into a base model |
+| RPC server | `ggml-rpc-server` | Distribute layers over the network |
+
+### Running a tool: the process, then the result
+
+A one-shot tool (quantize, imatrix, split, benchmark, edit, LoRA merge) is run from
+the same shape everywhere — a form that explains itself, a **Command** line showing
+the exact argv before you commit — and then two states instead of one
+undifferentiated log:
+
+- **Process**, while it runs: a progress bar and a counter read from the tool's own
+  tensor lines (`[  12/ 291] blk.0.attn_q.weight …`), the item being worked on, the
+  elapsed time, and a rolling log.
+- **Result**, when it finishes: exit code and duration, the output path with its size
+  as it actually is **on disk**, the numbers the tool reported itself (model size →
+  quant size, BPW both sides, conversion time, tensors processed), a hint naming the
+  setting that fixes the common failures ("already quantized" → Allow requantize; a
+  missing input → the path is wrong), and what follows: **Add to library**, Run
+  again, and the full log.
+
+The run is read back out of the event bus rather than accumulated in component
+state, so leaving the page and returning shows the same progress and the same result
+instead of an empty console — and starting a second run never shows the first one's
+result while the new one is still in flight.
 
 ### Design language
 
@@ -278,6 +303,19 @@ page"):
   schema wants an array. Arguments are coerced to their declared JSON type
   before dispatch. Sampling is clamped too: an agent turn runs at ≤ 0.3, since
   the chat slider exists for wording, not for tool correctness.
+
+- **It described the work instead of doing it.** Observed on a real request
+  ("change the padding"): the model called `tree` + `read_file`, then answered
+  *"Now I'll look at the index.css file to see the current padding styles:"* —
+  an announcement, no edit. A text-only reply is what ends a turn, so the user
+  got a plan and nothing changed. The loop now recognises a plan (`looksLikePlan`:
+  forward-looking wording aimed at file work, and no completion wording) and
+  continues the turn with a firm instruction to make the call — at most twice,
+  and never once a mutating tool has actually succeeded. The rules state the trap
+  outright, and the turn says what happened: while it is being pushed back to
+  work the run chip reads *"the model described the next step instead of making
+  it"*, and a turn that still ends as a plan is marked **"ended as a plan —
+  nothing changed"** on the reply.
 
 An empty final answer is retried once at temperature 0 rather than surfaced as
 "the model finished without saying anything".
@@ -585,7 +623,7 @@ area, wired in `routes/index.ts`; the server entry is a thin transport shell.
 
 | Endpoint | Purpose |
 |---|---|
-| `POST /api/agent` | one agentic turn over SSE (tools, approvals, questions) |
+| `POST /api/agent` | one agentic turn over SSE (tools, approvals, questions, `action_nudge`) |
 | `POST /api/agent/attach` | replay a live run's buffer, then continue |
 | `GET /api/agent/status` · `POST /api/agent/stop` · `POST /api/agent/steer/:id` | run control |
 | `POST /api/agent/approve/:id` · `POST /api/agent/answer/:id` | resume a parked turn |

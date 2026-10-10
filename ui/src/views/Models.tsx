@@ -1,9 +1,10 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { Boxes, FolderPlus, HardDrive, MessagesSquare, RefreshCw, Server as ServerIcon, Square, Trash2 } from "lucide-react";
+import { Boxes, FolderOpen, FolderPlus, HardDrive, MessagesSquare, RefreshCw, Server as ServerIcon, Square, Trash2 } from "lucide-react";
 import { api } from "../lib/api";
 import type { LocalModel, ManagedProcess } from "../lib/types";
 import { Badge, Button, Card, CardHead, Empty, Field, Spinner, usePoll, useToast } from "../components/ui";
 import { ModelLoading, useServerReady, useLoadFailure, FailedLoad } from "../components/ModelLoading";
+import { GgufPicker } from "../components/GgufPicker";
 import { bytes, fileBase, shortPath, timeAgo } from "../lib/format";
 import type { EventBus } from "../App";
 import type { ViewId } from "../App";
@@ -38,6 +39,7 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
   const [procs, setProcs] = useState<ManagedProcess[]>([]);
   const [selected, setSelected] = useState<LocalModel | null>(null);
   const [importPath, setImportPath] = useState("");
+  const [picking, setPicking] = useState(false);
   const [pending, setPending] = useState<string | null>(null);
 
   const load = () => {
@@ -178,7 +180,30 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
               />
             </div>
             <Button onClick={add} disabled={!importPath.trim()}>Import</Button>
+            <Button variant="ghost" onClick={() => setPicking(true)} title="Browse the disk for a .gguf file">
+              <FolderOpen size={14} /> Browse…
+            </Button>
           </div>
+
+          {picking && (
+            <GgufPicker
+              models={models}
+              value={importPath}
+              onClose={() => setPicking(false)}
+              onPick={async (path, opts) => {
+                setPicking(false);
+                setImportPath(path);
+                if (!opts.addToLibrary) return;
+                try {
+                  await api.addModel({ file: path });
+                  load();
+                  toast.push("ok", "Model added to library.");
+                } catch (e) {
+                  toast.push("err", (e as Error).message);
+                }
+              }}
+            />
+          )}
 
           {showFailure && failure && (
             <div style={{ marginBottom: 16 }}>

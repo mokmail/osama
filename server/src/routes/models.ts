@@ -1,7 +1,7 @@
 import process from "node:process";
 import path from "node:path";
 import * as core from "@osama/core";
-import { fail, json, readBody, route, type RouteModule } from "../http.js";
+import { fail, json, q, readBody, route, type RouteModule } from "../http.js";
 
 /**
  * The model library, and the one-shot / long-running tool runs.
@@ -32,6 +32,28 @@ export const modelRoutes: RouteModule = (deps) => [
   route("GET", "/api/models", ({ res }) => json(res, 200, { models: core.listModels() })),
 
   route("POST", "/api/models/scan", ({ res }) => json(res, 200, { models: core.scanModelsDir() })),
+
+  /**
+   * GGUF files under a directory — the picker's "search here" action. Bounded by
+   * the core walk, and each hit says whether it is already in the library.
+   */
+  route("GET", "/api/models/find", ({ res, url }) => {
+    const asked = q(url, "dir");
+    const dir =
+      asked === "@models"
+        ? core.paths().models
+        : asked === "@workspace"
+          ? core.getWorkspace()
+          : asked === "@home"
+            ? process.env.HOME ?? core.getWorkspace()
+            : asked;
+    if (!dir) return json(res, 400, { ok: false, error: "dir is required" });
+    const r = core.findGgufFiles(dir, {
+      maxDepth: Number(q(url, "depth") ?? 2),
+      maxFiles: Number(q(url, "max") ?? 300),
+    });
+    json(res, r.ok ? 200 : 400, r);
+  }),
 
   route("POST", "/api/models/add", async ({ req, res }) => {
     const body = await readBody(req);

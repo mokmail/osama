@@ -157,6 +157,89 @@ export function removeModel(id: string, deleteFile = false): void {
 }
 
 /** Scan the Osama models dir and auto-register GGUFs not yet in the library. */
+export interface GgufHit {
+  name: string;
+  path: string;
+  sizeBytes: number;
+  /** already registered, so picking it does not duplicate the library entry */
+  inLibrary: boolean;
+}
+
+/**
+ * Find GGUF files under a directory, for the model picker's "search here".
+ *
+ * Bounded on purpose: a home directory can hold tens of thousands of files and
+ * the picker has to answer immediately, so the walk stops at `maxDepth` and
+ * `maxFiles` and reports `truncated` rather than hanging.
+ */
+export function findGgufFiles(dir: string, opts: { maxDepth?: number; maxFiles?: number } = {}): {
+  ok: boolean;
+  dir?: string;
+  files?: GgufHit[];
+  truncated?: boolean;
+  error?: string;
+} {
+  const raw = dir?.trim();
+  if (!raw) return { ok: false, error: "a directory is required" };
+  const root = path.resolve(raw.startsWith("~") ? raw.replace(/^~/, process.env.HOME ?? "") : raw);
+  try {
+    if (!fs.statSync(root).isDirectory()) return { ok: false, error: `${root} is not a directory` };
+  } catch {
+    return { ok: false, error: `${root} does not exist` };
+  }
+
+  const maxDepth = Math.max(0, Math.min(opts.maxDepth ?? 2, 6));
+  const maxFiles = Math.max(1, Math.min(opts.maxFiles ?? 300, 2000));
+  const known = new Set(listModels().map((m) => path.resolve(m.file)));
+  const files: GgufHit[] = [];
+  let truncated = false;
+
+  const walk = (d: string, depth: number): void => {
+    if (truncated || depth > maxDepth) return;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return; // unreadable folder is not an error for a search
+    }
+    for (const e of entries) {
+      if (truncated) return;
+      const full = path.join(d, e.name);
+      let isDir = e.isDirectory();
+      if (e.isSymbolicLink()) {
+        // Follow a link to a FILE (HF cache blobs are symlinks), never into a
+        // directory: recursing through dir links is how a bounded walk becomes
+        // unbounded.
+        try {
+          isDir = fs.statSync(full).isDirectory();
+        } catch {
+          continue; // broken link
+        }
+        if (isDir) continue;
+      }
+      if (isDir) {
+        if (!e.name.startsWith(".")) walk(full, depth + 1);
+        continue;
+      }
+      if (!e.name.toLowerCase().endsWith(".gguf")) continue;
+      let size = 0;
+      try {
+        size = fs.statSync(full).size;
+      } catch {
+        continue; // broken link
+      }
+      files.push({ name: e.name, path: full, sizeBytes: size, inLibrary: known.has(path.resolve(full)) });
+      if (files.length >= maxFiles) {
+        truncated = true;
+        return;
+      }
+    }
+  };
+  walk(root, 0);
+
+  return { ok: true, dir: root, files: files.sort((a, b) => b.sizeBytes - a.sizeBytes), truncated };
+}
+
 export function scanModelsDir(): LocalModel[] {
   const dir = paths().models;
   if (!fs.existsSync(dir)) return listModels();

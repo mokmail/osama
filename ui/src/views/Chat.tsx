@@ -1693,6 +1693,16 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
                     <span className="cm-avatar">{m.role === "user" ? <User size={13} /> : <Bot size={13} />}</span>
                     <span className="cm-name">{who}</span>
                     {m.role === "assistant" && m.stepCount ? <span className="cm-meta">{m.stepCount} step{m.stepCount === 1 ? "" : "s"}</span> : null}
+                    {/*
+                      Honest end-state: the turn was continued because the model
+                      answered with a plan, and it still ended without any file
+                      change. Without this the reply reads as if work happened.
+                    */}
+                    {m.role === "assistant" && m.changed === false && (m.nudges ?? 0) > 0 ? (
+                      <span className="cm-meta cm-planonly" title="The model was asked to continue but answered with a description instead of a tool call. Nothing was written or run.">
+                        ended as a plan — nothing changed
+                      </span>
+                    ) : null}
                     <span className="spacer" style={{ flex: 1 }} />
                     <div className={`cm-actions ${m.role === "user" ? "for-user" : ""}`}>
                       {m.role === "user" && !streaming && (

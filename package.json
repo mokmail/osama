@@ -4,6 +4,9 @@
   "private": true,
   "description": "Osama — a modern GUI for installing and using llama.cpp (run, serve, download, quantize, benchmark).",
   "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/mokmail/osama.git" },
+  "homepage": "https://github.com/mokmail/osama#readme",
+  "bugs": { "url": "https://github.com/mokmail/osama/issues" },
   "type": "module",
   "workspaces": [
     "core",

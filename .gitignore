@@ -9,6 +9,18 @@ src-tauri/gen/
 # runtime state (never commit local engine data)
 .osama/
 *.log
+# secrets and credentials — never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+service-account*.json
+.npmrc
+.netrc
 # tools / editors / os
 .hermes/
 .idea/

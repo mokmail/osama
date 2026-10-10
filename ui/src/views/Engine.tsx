@@ -15,6 +15,8 @@ export function EngineView({ system, bus }: { system: SystemResponse | null; bus
   const [selectedAccel, setSelectedAccel] = useState<string>("");
   const [selectedRelease, setSelectedRelease] = useState<string>("");
   const [busy, setBusy] = useState(false);
+  /** Set when the release list is a cached one because GitHub said no. */
+  const [releaseNote, setReleaseNote] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
 
   const load = () => {
@@ -26,7 +28,7 @@ export function EngineView({ system, bus }: { system: SystemResponse | null; bus
   usePoll(load, 5000);
 
   useEffect(() => {
-    api.releases(6).then((r) => setReleases(r.releases)).catch((e) => toast.push("err", e.message));
+    api.releases(6).then((r) => { setReleases(r.releases); setReleaseNote(r.note ?? null); }).catch((e) => toast.push("err", e.message));
     api.enginePlan().then((p) => {
       setPlan(p);
       const rec = system?.recommendedAcceleration;
@@ -171,7 +173,16 @@ export function EngineView({ system, bus }: { system: SystemResponse | null; bus
       </Card>
 
       <Card className="card-pad">
-        <CardHead title="Recent releases" sub="From github.com/ggml-org/llama.cpp" />
+        <CardHead
+          title="Recent releases"
+          sub={releaseNote ? "showing a cached list" : "From github.com/ggml-org/llama.cpp"}
+          right={
+            releaseNote ? undefined : (
+              <span className="faint small">unauthenticated GitHub API — 60 requests an hour</span>
+            )
+          }
+        />
+        {releaseNote && <div className="help" style={{ marginBottom: 8 }}>{releaseNote}</div>}
         <div className="stack" style={{ gap: 6 }}>
           {releases.map((r) => (
             <div key={r.tag} className="row" style={{ justifyContent: "space-between" }}>

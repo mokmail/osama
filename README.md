@@ -616,6 +616,8 @@ must already be in this server's own session log, so the caller cannot name
 | `OSAMA_SKILL_ROOTS` | — | Extra directories to discover skills from |
 | `OSAMA_OLLAMA_URL` | `http://127.0.0.1:11434` | Ollama endpoint, to read and pull its models |
 | `OSAMA_BASE` | `http://127.0.0.1:5178` | Base URL used by the headless scripts |
+| `GITHUB_TOKEN` (or `GH_TOKEN`) | — | Optional. The engine list comes from GitHub's API, which allows 60 requests an hour unauthenticated; a token raises that to 5000. Osama caches the list for 10 minutes and shows the cached copy when the limit is spent, so a token is convenience, not a requirement |
+| `OSAMA_GITHUB_API` | the llama.cpp releases URL | Point release discovery at a mirror or proxy |
 
 `OSAMA_AGENT` is set to `1` in the environment of subagents the agent spawns;
 it is not a switch you set to turn agent mode on. Agent mode is chosen per

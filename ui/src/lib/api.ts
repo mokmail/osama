@@ -78,7 +78,10 @@ export const api = {
   system: () => get<SystemResponse>("/api/system"),
 
   engine: () => get<{ engines: InstalledEngine[]; activeTag?: string; active?: InstalledEngine; knownTools: string[] }>("/api/engine"),
-  releases: (limit = 8) => get<{ releases: ReleaseInfo[] }>(`/api/engine/releases?limit=${limit}`),
+  releases: (limit = 8) =>
+    get<{ releases: ReleaseInfo[]; stale?: boolean; note?: string; rateLimitedUntil?: number }>(
+      `/api/engine/releases?limit=${limit}`
+    ),
   enginePlan: (tag?: string) => get<EnginePlan>(`/api/engine/plan${tag ? `?tag=${encodeURIComponent(tag)}` : ""}`),
   installEngine: (body: { tag?: string; acceleration?: string }) => post<{ started: boolean }>("/api/engine/install", body),
   activateEngine: (tag: string) => post<{ ok: boolean }>("/api/engine/activate", { tag }),

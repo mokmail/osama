@@ -16,7 +16,163 @@ import { extractArchive, stripCommonRoot, repairSymlinks } from "./extract.js";
 
 const log = logger("engine");
 
-const GITHUB_API = "https://api.github.com/repos/ggml-org/llama.cpp/releases";
+/**
+ * Where the release list comes from. Overridable so a mirror or a proxy can be
+ * used — and so the caching below can be tested against a local server instead of
+ * spending the real rate limit.
+ */
+const GITHUB_API =
+  process.env.OSAMA_GITHUB_API ?? "https://api.github.com/repos/ggml-org/llama.cpp/releases";
+
+/**
+ * GitHub allows 60 unauthenticated API requests an hour, per IP. Every visit to
+ * the Engine view used to spend two of them (releases + plan) on mount, so a few
+ * reloads — or a second tab — exhausted the budget and the view showed a 500.
+ *
+ * A release list is not news every second: it is fetched at most once per TTL,
+ * concurrent callers share one request, and an exhausted limit degrades to the
+ * last list we have with a sentence saying so, instead of failing.
+ */
+const RELEASES_TTL_MS = 10 * 60_000;
+const RATE_LIMIT_FALLBACK_MS = 15 * 60_000;
+
+interface ReleaseCache {
+  at: number;
+  limit: number;
+  releases: ReleaseInfo[];
+}
+
+let cache: ReleaseCache | null = null;
+let inFlight: Promise<ReleaseInfo[]> | null = null;
+let limitedUntil = 0;
+
+export interface ReleasesReport {
+  releases: ReleaseInfo[];
+  /** true when these are from cache because GitHub could not be asked */
+  stale: boolean;
+  /** a sentence for the UI when stale */
+  note?: string;
+  /** epoch ms when the API limit resets, when GitHub told us */
+  rateLimitedUntil?: number;
+  /** whether the request carried a token (60/hour → 5000/hour) */
+  authenticated: boolean;
+}
+
+/** A token is never required — it only raises the ceiling. */
+function githubToken(): string | undefined {
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  return token && token.trim() ? token.trim() : undefined;
+}
+
+function resetAt(res: Response): number {
+  const header = Number(res.headers.get("x-ratelimit-reset"));
+  return Number.isFinite(header) && header > 0 ? header * 1000 : Date.now() + RATE_LIMIT_FALLBACK_MS;
+}
+
+function describeLimit(hasCache: boolean): string {
+  const minutes = Math.max(1, Math.ceil((limitedUntil - Date.now()) / 60_000));
+  const how = githubToken()
+    ? "the token's GitHub API limit is exhausted"
+    : "GitHub's unauthenticated API limit is exhausted (60 requests an hour — set GITHUB_TOKEN for 5000)";
+  const tail = hasCache
+    ? "Showing the last list fetched."
+    : "There is no cached list yet; it will load once the limit resets.";
+  return `${how}; about ${minutes} more minute${minutes === 1 ? "" : "s"}. ${tail}`;
+}
+
+async function fetchReleases(limit: number): Promise<{ releases: ReleaseInfo[]; exhaustedUntil?: number }> {
+  const token = githubToken();
+  const res = await fetch(`${GITHUB_API}?per_page=${limit}`, {
+    headers: {
+      accept: "application/vnd.github+json",
+      "user-agent": "osama/0.1",
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  if (res.status === 403 || res.status === 429) return { releases: [], exhaustedUntil: resetAt(res) };
+  if (!res.ok) throw new Error(`GitHub API ${res.status}: ${res.statusText}`);
+  const raw = (await res.json()) as any[];
+  const releases = raw.map((r) => ({
+    tag: r.tag_name,
+    name: r.name ?? r.tag_name,
+    publishedAt: r.published_at,
+    htmlUrl: r.html_url,
+    assets: (r.assets ?? []).map((a: any) => ({
+      name: a.name,
+      size: a.size,
+      browser_download_url: a.browser_download_url,
+    })),
+  }));
+  // A successful response can still be the last one this window: note the reset.
+  const remaining = Number(res.headers.get("x-ratelimit-remaining"));
+  return { releases, exhaustedUntil: remaining === 0 ? resetAt(res) : undefined };
+}
+
+/**
+ * The release list, with the caching rules above.
+ *
+ * `force` skips the cache (an explicit Refresh in the UI), and still refuses to
+ * burn a request that GitHub is going to reject.
+ */
+export async function refreshReleases(limit = 10, force = false): Promise<ReleasesReport> {
+  const authenticated = Boolean(githubToken());
+  const now = Date.now();
+  if (cache && cache.limit >= limit && !force && now - cache.at < RELEASES_TTL_MS) {
+    return { releases: cache.releases.slice(0, limit), stale: false, authenticated };
+  }
+  if (limitedUntil > now && !force) {
+    return {
+      releases: (cache?.releases ?? []).slice(0, limit),
+      stale: true,
+      note: describeLimit(Boolean(cache)),
+      rateLimitedUntil: limitedUntil,
+      authenticated,
+    };
+  }
+  // One request for however many callers are waiting on it.
+  if (!inFlight) {
+    const want = Math.max(limit, cache?.limit ?? 0);
+    inFlight = (async () => {
+      try {
+        const { releases, exhaustedUntil } = await fetchReleases(want);
+        if (exhaustedUntil) {
+          // Nothing cached and nothing to fetch: that is a legitimate answer for a
+          // list endpoint ("none, and here is why"), not a transport failure.
+          limitedUntil = exhaustedUntil;
+        } else {
+          cache = { at: Date.now(), limit: Math.max(want, releases.length), releases };
+          limitedUntil = 0;
+        }
+        return cache?.releases ?? releases;
+      } finally {
+        inFlight = null;
+      }
+    })();
+  }
+  try {
+    const releases = await inFlight;
+    const spent = limitedUntil > Date.now();
+    return {
+      releases: releases.slice(0, limit),
+      stale: spent,
+      note: spent ? describeLimit(Boolean(cache)) : undefined,
+      rateLimitedUntil: spent ? limitedUntil : undefined,
+      authenticated,
+    };
+  } catch (err) {
+    if (!cache) throw err;
+    return {
+      releases: cache.releases.slice(0, limit),
+      stale: true,
+      note: `GitHub could not be reached (${err instanceof Error ? err.message : String(err)}) — showing the last list fetched.`,
+      authenticated,
+    };
+  }
+}
+
+export async function listReleases(limit = 10): Promise<ReleaseInfo[]> {
+  return (await refreshReleases(limit)).releases;
+}
 
 /**
  * The front-ends Osama's command catalogue can build an argv for. A missing
@@ -106,28 +262,11 @@ interface Registry {
 // ---------------------------------------------------------------------------
 
 /** List recent llama.cpp releases (newest first), with their assets. */
-export async function listReleases(limit = 10): Promise<ReleaseInfo[]> {
-  const res = await fetch(`${GITHUB_API}?per_page=${limit}`, {
-    headers: { accept: "application/vnd.github+json", "user-agent": "osama/0.1" },
-  });
-  if (!res.ok) throw new Error(`GitHub API ${res.status}: ${res.statusText}`);
-  const raw = (await res.json()) as any[];
-  return raw.map((r) => ({
-    tag: r.tag_name,
-    name: r.name ?? r.tag_name,
-    publishedAt: r.published_at,
-    htmlUrl: r.html_url,
-    assets: (r.assets ?? []).map((a: any) => ({
-      name: a.name,
-      size: a.size,
-      browser_download_url: a.browser_download_url,
-    })),
-  }));
-}
-
 export async function latestRelease(): Promise<ReleaseInfo> {
-  const [first] = await listReleases(1);
-  if (!first) throw new Error("no llama.cpp releases found");
+  const report = await refreshReleases(1);
+  const first = report.releases[0];
+  // Installing needs a tag; when the limit is why we have none, say that.
+  if (!first) throw new Error(report.note ?? "no llama.cpp releases found");
   return first;
 }
 

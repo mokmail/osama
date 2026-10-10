@@ -1,6 +1,6 @@
 import process from "node:process";
 import * as core from "@osama/core";
-import { json, readBody, route, type RouteModule } from "../http.js";
+import { fail, json, readBody, route, type RouteModule } from "../http.js";
 
 /**
  * Health, machine probing, and the engine/tool catalogue.
@@ -39,19 +39,36 @@ export const systemRoutes: RouteModule = (deps) => [
 
   route("GET", "/api/engine/releases", async ({ res, url }) => {
     const limit = Number(url.searchParams.get("limit") ?? 8);
-    json(res, 200, { releases: await core.listReleases(limit) });
+    // Cached and rate-limit aware: a 200 with `stale` + `note` beats a 500 when
+    // GitHub's hourly budget is spent (see refreshReleases in core/src/engine.ts).
+    try {
+      json(res, 200, await core.refreshReleases(limit));
+    } catch (e) {
+      fail(res, 503, e);
+    }
   }),
 
   route("GET", "/api/engine/plan", async ({ res, url }) => {
     const tag = url.searchParams.get("tag") ?? undefined;
-    const release = tag ? (await core.listReleases(30)).find((r) => r.tag === tag) : await core.latestRelease();
-    if (!release) return json(res, 404, { error: `release ${tag} not found` });
+    let report: core.ReleasesReport;
+    try {
+      report = await core.refreshReleases(tag ? 30 : 8);
+    } catch (e) {
+      // Nothing cached and GitHub refused: the message names the limit and the reset.
+      return fail(res, 503, e);
+    }
+    const release = tag ? report.releases.find((r) => r.tag === tag) : report.releases[0];
+    if (!release) {
+      // "not found" would be a lie when the real reason is that GitHub said no.
+      return report.note ? fail(res, 503, new Error(report.note)) : fail(res, 404, new Error(`release ${tag ?? "(latest)"} not found`));
+    }
     json(res, 200, {
       tag: release.tag,
       publishedAt: release.publishedAt,
       os: core.currentOs(),
       arch: core.currentArch(),
       variants: core.planForCurrentMachine(release),
+      ...(report.stale ? { stale: true, note: report.note } : {}),
     });
   }),
 

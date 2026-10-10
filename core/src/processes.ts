@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import path from "node:path";
 import { logger, processLogPath } from "./logger.js";
 
 const log = logger("process");
@@ -325,6 +326,55 @@ export function killAllProcesses(): number {
 }
 
 /** Run a tool to completion and capture stdout/stderr (for bench, quantize, …). */
+export type EngineKind = "llama.cpp" | "mlx" | "unknown";
+
+/** The process Osama started for a base URL, if it is still on record. */
+function processForServer(baseUrl: string): ManagedProcessInfo | undefined {
+  const url = baseUrl.replace(/\/+$/, "");
+  return listProcesses().find((p) => (p.url ?? "").replace(/\/+$/, "") === url);
+}
+
+/**
+ * Which engine is behind a base URL, according to the processes Osama started.
+ *
+ * Read from the command line rather than guessed from the HTTP surface: the two
+ * servers disagree about `/props`, so asking the protocol what it is would mean
+ * treating an absent route as an identity.
+ */
+export function engineKindForServer(baseUrl: string): EngineKind {
+  const p = processForServer(baseUrl);
+  if (!p) return "unknown";
+  const line = `${p.tool} ${p.argv.join(" ")}`;
+  if (/mlx_lm/.test(line)) return "mlx";
+  if (/llama-server/.test(line)) return "llama.cpp";
+  return "unknown";
+}
+
+/** The weights a running server was pointed at — a GGUF path, or an MLX directory. */
+export function servedModelForServer(baseUrl: string): string | undefined {
+  const p = processForServer(baseUrl);
+  if (!p) return undefined;
+  const argv = p.argv;
+  const i = argv.indexOf("--model") >= 0 ? argv.indexOf("--model") : argv.indexOf("-m");
+  const value = i >= 0 ? argv[i + 1] : undefined;
+  if (!value) return undefined;
+  return path.isAbsolute(value) ? value : path.resolve(p.cwd ?? ".", value);
+}
+
+/**
+ * The value to put in the OpenAI `model` field for a local server.
+ *
+ * llama.cpp ignores it; **mlx-lm uses it to pick a model**, so sending the
+ * placeholder Osama's UI uses for "whatever is loaded" made every MLX request try
+ * to fetch a Hugging Face repo called `local` and fail with a 404. A real model
+ * name (Ollama's, or one typed for a remote server) is always left alone.
+ */
+export function resolveRequestModel(baseUrl: string, requested?: string): string | undefined {
+  const placeholder = !requested || /^(local|local-model|default|current)$/i.test(requested.trim());
+  if (!placeholder) return requested;
+  return servedModelForServer(baseUrl) ?? requested;
+}
+
 export interface RunResult {
   code: number | null;
   signal: string | null;

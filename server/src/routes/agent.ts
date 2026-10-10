@@ -286,7 +286,10 @@ export const agentRoutes: RouteModule = (deps) => {
       // "unlimited" but Ollama rejects any value <= 0 with an
       // invalid_request_error. An absent field is unlimited on both.
       const body: Record<string, unknown> = {
-        model: payload.model,
+        // llama.cpp ignores this field; mlx-lm *uses* it to choose a model, so a
+        // bare "local" made every agent turn ask Hugging Face for a repo called
+        // "local" (404). Resolve it against the server Osama started.
+        model: core.resolveRequestModel(ctx.base, payload.model),
         messages: payload.messages,
         tools: payload.tools,
         tool_choice: "auto",
@@ -1114,6 +1117,13 @@ async function toolSupportOf(base: string, model?: string): Promise<core.ToolSup
   const key = `${base}|${model ?? ""}`;
   const hit = toolSupportCache.get(key);
   if (hit) return hit;
+  // mlx-lm answers no /props, but it parses `tools` and emits `tool_calls` — the
+  // absence of the route is not an absence of the capability. Read it from the
+  // process we started rather than from the protocol.
+  if (core.engineKindForServer(base) === "mlx") {
+    toolSupportCache.set(key, "full");
+    return "full";
+  }
   if (core.looksLikeOllama(base)) {
     if (model) {
       const info = await core.ollamaShow(model, base);

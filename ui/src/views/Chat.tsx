@@ -4,13 +4,13 @@ import {
   Bot, Check as CheckIcon, ChevronDown, Copy, FileText, Folder, FolderOpen, GitBranch, Image as ImageIcon,
   Paperclip, Pencil, Play, Plug, RefreshCw, RotateCcw, Send, Sparkles, StopCircle, Trash2, User, X, AlertTriangle, Plus,
 } from "lucide-react";
-import { api, agentApi, type AgentMessagePayload } from "../lib/api";
+import { api, agentApi, mlxApi, type AgentMessagePayload } from "../lib/api";
 import {
   adoptSessionId, answerApproval, answerQuestion, attachToRun,
   clearCompaction, clearTodos, currentSessionId, findLiveRun, getChatState,
   newRunId, noteCompaction, resetSession, setMessages, startRun, stopRun, useChat,
 } from "../lib/runStore";
-import type { AgentQuestion, AgentStep, AgentTool, ContextBreakdown, LocalModel, ManagedProcess, McpServerStatus, MemoryStats, OllamaStatus, PromptSection, SkillMeta, SystemResponse, TodoItem, WorkspaceFile } from "../lib/types";
+import type { AgentQuestion, AgentStep, AgentTool, ContextBreakdown, LocalModel, MlxModel, MlxStatus, ManagedProcess, McpServerStatus, MemoryStats, OllamaStatus, PromptSection, SkillMeta, SystemResponse, TodoItem, WorkspaceFile } from "../lib/types";
 import { Badge, Button, Empty, Spinner, useToast } from "../components/ui";
 import { ActivityLine, AgentTrace, ApprovalPrompt, QuestionPrompt } from "../components/AgentTrace";
 import { ChatInsights, type FocusSignal } from "../components/ChatInsights";
@@ -18,12 +18,12 @@ import { IdentityStrip } from "../components/IdentityPanels";
 import { RichContent } from "../components/rich";
 import { ModelLoading, useServerReady, useLoadFailure, FailedLoad } from "../components/ModelLoading";
 import { bytes, fileBase } from "../lib/format";
+import { isMlxServer, isModelServer, servedModelPath } from "../lib/procs";
 import {
   chatTitle, clearActive, loadActive, loadHistory, newChatId, saveActive, saveHistory, type StoredChat,
 } from "../lib/chatStore";
 import type { EventBus } from "../App";
 import type { ViewId } from "../App";
-import { isModelServer, servedModelPath } from "../lib/procs";
 
 export interface Attachment {
   id: string;
@@ -53,18 +53,20 @@ const ACTIVE_SKILLS_KEY = "osama.chat.skills";
 const PERSONALITY_KEY = "osama.chat.personality";
 
 /**
- * Chat provider: Osama's own llama.cpp server, or a local Ollama daemon the
- * user already runs. Persisted so the choice survives a reload; scoped to the
- * chat page only, so every other view keeps using Osama's llama.cpp process.
+ * Chat provider: Osama's own llama.cpp server, Osama's MLX runtime on Apple
+ * silicon, or a local Ollama daemon the user already runs. Persisted so the
+ * choice survives a reload; scoped to the chat page only, so every other view
+ * keeps using Osama's llama.cpp process.
  */
-type ChatProvider = "llamacpp" | "ollama";
+type ChatProvider = "llamacpp" | "mlx" | "ollama";
 const PROVIDER_KEY = "osama.chat.provider";
 const OLLAMA_URL_KEY = "osama.chat.ollamaUrl";
 const OLLAMA_MODEL_KEY = "osama.chat.ollamaModel";
 
 function loadProvider(): ChatProvider {
   try {
-    return localStorage.getItem(PROVIDER_KEY) === "ollama" ? "ollama" : "llamacpp";
+    const saved = localStorage.getItem(PROVIDER_KEY);
+    return saved === "ollama" || saved === "mlx" ? saved : "llamacpp";
   } catch {
     return "llamacpp";
   }
@@ -227,6 +229,10 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const [ollamaModel, setOllamaModel] = useState<string>(() => loadOllamaModel());
   const [ollama, setOllama] = useState<OllamaStatus | null>(null);
   const [ollamaChecking, setOllamaChecking] = useState(false);
+  /** MLX: Apple's runtime, and the models it can serve (docs/mlx-macos.md). */
+  const [mlx, setMlx] = useState<MlxStatus | null>(null);
+  const [mlxModels, setMlxModels] = useState<MlxModel[]>([]);
+  const [mlxServing, setMlxServing] = useState(false);
 
   /**
    * Connected MCP servers, so the composer can show that external tools are in
@@ -327,6 +333,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
 
   useEffect(() => {
     api.models().then((r) => setModels(r.models)).catch(() => {});
+    void loadMlx();
     load();
     focusInput();
     // Restore the conversation that was on screen before the refresh, so a
@@ -435,6 +442,21 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     return () => window.removeEventListener("osama:workspace-changed", onWs);
   }, [agentic]);
 
+  /**
+   * MLX: whether this machine can run it, which runtime Osama will use, and the
+   * model directories on disk. Loaded whatever the current provider is, because
+   * the switch has to know whether to offer MLX at all.
+   */
+  const loadMlx = useCallback(async () => {
+    try {
+      const [status, list] = await Promise.all([mlxApi.status(), mlxApi.models()]);
+      setMlx(status);
+      setMlxModels(list.models);
+    } catch {
+      setMlx(null);
+    }
+  }, []);
+
   // Ollama discovery: poll the daemon while the chat uses it, so a daemon that
   // starts or stops is reflected without a reload. The poll only runs for the
   // ollama provider, so the llama.cpp path is untouched.
@@ -496,12 +518,19 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   // readiness comes from its own /health and the poll keeps running until then.
   // For the Ollama provider there is no managed process: readiness is simply
   // "the daemon answered and a model is selected".
-  const healthReady = useServerReady(procs.some((p) => isModelServer(p)) ? baseUrl : undefined);
-  const serverProcess = procs.find((p) => isModelServer(p) && p.status === "running");
+  // Two engines can be started by Osama, and only one runs at a time (serving is
+  // exclusive), but the *provider* decides which one this view is talking to —
+  // and therefore which URL is probed and sent the request.
+  const mlxProcess = procs.find((p) => isMlxServer(p) && p.status === "running");
+  const llamaProcess = procs.find((p) => isModelServer(p) && !isMlxServer(p) && p.status === "running");
+  const providerUrl =
+    provider === "ollama" ? ollamaUrl : provider === "mlx" ? mlxProcess?.url ?? "" : llamaProcess?.url ?? baseUrl;
+  const healthReady = useServerReady(providerUrl || undefined);
+  const serverProcess = provider === "mlx" ? mlxProcess : llamaProcess;
   const ollamaReady = !!ollama?.reachable && !!ollamaModel;
-  const loading = provider === "llamacpp" && !!serverProcess && !healthReady;
+  const loading = provider !== "ollama" && !!serverProcess && !healthReady;
   // The provider's effective endpoint — what every request must be sent to.
-  const effectiveBaseUrl = provider === "ollama" ? ollamaUrl : baseUrl;
+  const effectiveBaseUrl = providerUrl;
   const failure = useLoadFailure(procs);
   const [dismissedFailure, setDismissedFailure] = useState<number | null>(null);
   /**
@@ -583,10 +612,35 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
     if (next === "ollama") {
       void loadOllama(true);
       toast.push("info", "Ollama provider — using your local daemon.");
+    } else if (next === "mlx") {
+      void loadMlx();
+      toast.push("info", "MLX provider — Apple's runtime, served from Osama's own environment.");
     } else {
       toast.push("info", "llama.cpp provider — using Osama's own server.");
     }
     focusInput();
+  }
+
+  /**
+   * Serve an MLX model and chat with it.
+   *
+   * Same rules as the Library's tile — one server at a time, and the route picks
+   * a free port when the default is taken — but from where the user is looking.
+   */
+  async function serveMlx(m: MlxModel) {
+    setMlxServing(true);
+    try {
+      const r = await mlxApi.serve({ model: m.dir, host: "127.0.0.1", port: SERVER_DEFAULTS.port });
+      const url = r.process.url;
+      toast.push("info", `${r.stopped?.length ? "Replaced the running server · " : ""}Loading ${m.name} with MLX…`);
+      if (url) await api.waitForServer(url, 180_000);
+      await load();
+      focusInput();
+    } catch (e) {
+      toast.push("err", `Could not start MLX: ${(e as Error).message}`);
+    } finally {
+      setMlxServing(false);
+    }
   }
 
   /** Archive the current conversation into history and start a blank one. */
@@ -1110,7 +1164,16 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   // page; once a conversation exists it docks to the bottom.
   const landing = messages.length === 0 && !startingServer;
 
-  const modelPicker = provider === "ollama" ? (
+  const modelPicker = provider === "mlx" ? (
+    <MlxPicker
+      status={mlx}
+      models={mlxModels}
+      servedDir={mlxProcess ? servedModelPath(mlxProcess) : undefined}
+      busy={mlxServing || loading}
+      onServe={serveMlx}
+      onRefresh={() => void loadMlx()}
+    />
+  ) : provider === "ollama" ? (
     <OllamaPicker
       status={ollama}
       selected={ollamaModel}
@@ -1142,6 +1205,17 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       >
         llama.cpp
       </button>
+      {mlx?.support.supported && (
+        <button
+          type="button"
+          className={`provswitch-btn ${provider === "mlx" ? "on" : ""}`}
+          onClick={() => switchProvider("mlx")}
+          title="Use MLX — Apple's runtime, served by Osama (Apple silicon only)"
+          aria-pressed={provider === "mlx"}
+        >
+          MLX
+        </button>
+      )}
       <button
         type="button"
         className={`provswitch-btn ${provider === "ollama" ? "on" : ""}`}
@@ -1575,18 +1649,24 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
         </Button>
       </div>
 
-      {provider === "llamacpp" && showFailure && failure && (
+      {provider !== "ollama" && showFailure && failure && (
         <FailedLoad proc={failure.proc} onDismiss={() => setDismissedFailure(failure.since)} />
       )}
 
-      {provider === "llamacpp" && startingServer && serverProcess && (
+      {provider !== "ollama" && startingServer && serverProcess && (
         <ModelLoading
           processId={serverProcess.id}
           url={serverProcess.url}
-          modelName={serving?.name ?? serverProcess.label.split(" · ").pop()}
+          modelName={
+            provider === "mlx"
+              ? servedModelPath(serverProcess)?.split("/").pop()
+              : serving?.name ?? serverProcess.label.split(" · ").pop()
+          }
           startedAt={serverProcess.startedAt}
           onReady={load}
-          onError={(m: string) => toast.push("err", `llama-server failed to load the model: ${m.slice(0, 160)}`)}
+          onError={(m: string) =>
+            toast.push("err", `${provider === "mlx" ? "mlx-lm" : "llama-server"} failed to load the model: ${m.slice(0, 160)}`)
+          }
         />
       )}
 
@@ -2028,6 +2108,125 @@ function ModelPicker({
             );
           })}
           <div className="mpick-foot">Choosing a model starts it — one server at a time.</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * The MLX model picker.
+ *
+ * Same popover shell as the library picker, but the list is Apple-runtime models
+ * — directories, not GGUFs — and choosing one *starts* it, because mlx-lm serves
+ * a single model that has to be loaded. It also says what to do when this machine
+ * has no MLX runtime yet, instead of showing an empty menu.
+ */
+function MlxPicker({
+  status, models, servedDir, busy, onServe, onRefresh,
+}: {
+  status: MlxStatus | null;
+  models: MlxModel[];
+  servedDir?: string;
+  busy: boolean;
+  onServe: (m: MlxModel) => void;
+  onRefresh: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const ready = status?.runtime.ready === true;
+  const label = busy
+    ? "switching…"
+    : servedDir
+      ? fileBase(servedDir)
+      : ready
+        ? models.length
+          ? "Choose an MLX model"
+          : "No MLX models on disk"
+        : "MLX runtime not installed";
+
+  return (
+    <div className="mpick" ref={rootRef}>
+      <button
+        type="button"
+        className={`mpick-btn ${open ? "open" : ""}`}
+        onClick={() => setOpen((v) => !v)}
+        disabled={busy || !ready || models.length === 0}
+        title={servedDir ? `Serving ${fileBase(servedDir)} with MLX` : "Choose the MLX model to serve"}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        {busy ? <Spinner /> : <Bot size={15} className="mpick-bot" />}
+        <span className="mpick-name">{label}</span>
+        <ChevronDown size={14} className="mpick-chev" />
+      </button>
+
+      {open && (
+        <div className="mpick-menu" role="listbox">
+          <div className="mpick-head">
+            MLX models
+            {status?.runtime.mlxLmVersion ? <span className="faint"> · mlx-lm {status.runtime.mlxLmVersion}</span> : null}
+          </div>
+          {models.map((m) => {
+            const active = servedDir === m.dir;
+            return (
+              <button
+                key={m.dir}
+                type="button"
+                role="option"
+                aria-selected={active}
+                className={`mpick-item ${active ? "active" : ""}`}
+                onClick={() => {
+                  setOpen(false);
+                  if (!active) onServe(m);
+                }}
+              >
+                <span className="mpick-tick">{active && <CheckIcon size={13} />}</span>
+                <span className="mpick-item-body">
+                  <span className="mpick-item-name" title={m.dir}>{m.name}</span>
+                  <span className="mpick-item-meta">
+                    {m.quantization?.bits ? `${m.quantization.bits}-bit` : "?"}
+                    {m.quantization?.groupSize ? ` g${m.quantization.groupSize}` : ""}
+                    {m.contextLength ? ` · ${Math.round(m.contextLength / 1024)}k ctx` : ""}
+                  </span>
+                </span>
+                <span className="mpick-item-size">{bytes(m.sizeBytes)}</span>
+              </button>
+            );
+          })}
+          {!ready && (
+            <div className="mpick-foot">
+              No MLX runtime yet — install it from the Library's MLX card (uv builds it in seconds).
+            </div>
+          )}
+          {ready && models.length === 0 && (
+            <div className="mpick-foot">
+              Nothing to serve: an MLX model is a directory with config.json and .safetensors weights.
+            </div>
+          )}
+          {ready && models.length > 0 && (
+            <div className="mpick-foot row" style={{ gap: 8 }}>
+              <span style={{ flex: 1 }}>Choosing a model starts it — one server at a time.</span>
+              <button type="button" className="btn ghost sm" onClick={onRefresh} title="Rescan the models directory">
+                <RefreshCw size={12} /> Rescan
+              </button>
+            </div>
+          )}
         </div>
       )}
     </div>

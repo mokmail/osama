@@ -146,7 +146,15 @@ export function createMeter(base: string, opts: { model?: string } = {}): Meter 
           }
         }
       } catch {
-        /* fall through to the default */
+        /* fall through */
+      }
+      // mlx-lm has no /props. If the server is one Osama started for an MLX model,
+      // the model's own config is the answer; otherwise 4096 remains the fallback.
+      const { mlxWindowFor } = await import("./mlx.js");
+      const mlx = mlxWindowFor(root);
+      if (mlx && mlx > 0) {
+        memo.set("window", mlx);
+        return mlx;
       }
       return 4096;
     },

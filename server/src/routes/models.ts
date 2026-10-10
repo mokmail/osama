@@ -353,6 +353,10 @@ export const modelRoutes: RouteModule = (deps) => [
     // Ollama rejects it with invalid_request_error, so drop the field when it
     // is not a real cap. This is the shared proxy, so it fixes every caller.
     if (typeof payload.max_tokens === "number" && payload.max_tokens <= 0) delete payload.max_tokens;
+    // Same reasoning as the agent transport: a placeholder model name is fine for
+    // llama.cpp and fatal for mlx-lm, which resolves it as a Hub repo.
+    const resolved = core.resolveRequestModel(base, typeof payload.model === "string" ? payload.model : undefined);
+    if (resolved) payload.model = resolved;
     const upstream = await fetch(`${base.replace(/\/$/, "")}/v1/chat/completions`, {
       method: "POST",
       headers: {

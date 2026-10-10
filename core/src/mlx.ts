@@ -2,7 +2,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { childEnv } from "./processes.js";
+import { childEnv, engineKindForServer, servedModelForServer } from "./processes.js";
+
+/** Local alias: keeps the import list at the top of this module readable. */
+const mlxProcessHelpers = { engineKindForServer, servedModelForServer };
 import { paths, osamaHome } from "./paths.js";
 
 const log = logger("mlx");
@@ -571,6 +574,26 @@ export function mlxServeCommand(
   }
   if (!runtime.python) throw new Error("no MLX interpreter available");
   return { tool: runtime.python, argv: ["-m", "mlx_lm", ...argv], cwd };
+}
+
+/**
+ * The context window of the MLX model a given server is serving.
+ *
+ * mlx-lm has no `/props`, so the meter in `context.ts` would otherwise fall back
+ * to a 4096 default and over-report pressure on a model that carries 32k. The
+ * model's own `config.json` is the honest source, and it is a number Osama already
+ * reads for the Library.
+ */
+export function mlxWindowFor(baseUrl: string): number | undefined {
+  const { engineKindForServer, servedModelForServer } = mlxProcessHelpers;
+  if (engineKindForServer(baseUrl) !== "mlx") return undefined;
+  const dir = servedModelForServer(baseUrl);
+  if (!dir) return undefined;
+  try {
+    return describeMlxModel(dir).contextLength;
+  } catch {
+    return undefined;
+  }
 }
 
 /* -------------------------------------------------------------------- probe */

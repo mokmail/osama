@@ -9,6 +9,21 @@ import { fail, json, readBody, route, type RouteModule } from "../http.js";
  * llama.cpp routes know nothing about it. Progress for an install streams over
  * the same SSE bus under its own `mlx` event type.
  */
+/**
+ * Why MLX cannot run here, or null when it can.
+ *
+ * MLX is Apple silicon only, and this is checked on both sides: the UI does not
+ * render the card or the provider button at all on another machine, and every route
+ * that would *do* something refuses with the same sentence. Refusing matters for
+ * more than tidiness — `install` shells out to `uv` and pip, and a fetch would spend
+ * real bandwidth on a model that could never be served here. `GET /api/mlx/status`
+ * deliberately stays open: it is how a client finds out.
+ */
+function unsupported(): string | null {
+  const support = core.mlxSupport();
+  return support.supported ? null : (support.reason ?? "MLX is not supported on this machine.");
+}
+
 export const mlxRoutes: RouteModule = (deps) => [
   /** Support, runtime and what is on disk — one call for the UI card. */
   route("GET", "/api/mlx/status", async ({ res }) => {
@@ -28,6 +43,8 @@ export const mlxRoutes: RouteModule = (deps) => [
    * work starts and the log arrives on the event bus, line by line.
    */
   route("POST", "/api/mlx/install", async ({ res }) => {
+    const why = unsupported();
+    if (why) return fail(res, 409, new Error(why));
     core
       .installRuntime((e) => deps.broadcast("mlx", e))
       .then((runtime) => deps.broadcast("mlx", { stage: "installed", runtime }))
@@ -58,6 +75,8 @@ export const mlxRoutes: RouteModule = (deps) => [
    * supervised (logs and exit go out on the bus).
    */
   route("POST", "/api/mlx/serve", async ({ req, res }) => {
+    const why = unsupported();
+    if (why) return fail(res, 409, new Error(why));
     const body = await readBody(req);
     const model = String(body.model ?? "");
     if (!model) return fail(res, 400, new Error("model is required"));
@@ -142,6 +161,8 @@ export const mlxRoutes: RouteModule = (deps) => [
 
   /** Search the MLX catalogue (Hugging Face's `mlx` tag, or one publisher). */
   route("GET", "/api/mlx/search", async ({ res, url }) => {
+    const why = unsupported();
+    if (why) return fail(res, 409, new Error(why));
     const q = url.searchParams.get("q") ?? "";
     const source = (url.searchParams.get("source") ?? "mlx") as core.MlxSourceId;
     const limit = Number(url.searchParams.get("limit") ?? 24);
@@ -154,6 +175,8 @@ export const mlxRoutes: RouteModule = (deps) => [
 
   /** What one repo would cost to fetch — size, bits, window — before fetching it. */
   route("GET", "/api/mlx/repo", async ({ res, url }) => {
+    const why = unsupported();
+    if (why) return fail(res, 409, new Error(why));
     const ref = url.searchParams.get("ref");
     if (!ref) return fail(res, 400, new Error("ref is required"));
     const source = (url.searchParams.get("source") ?? "mlx") as core.MlxSourceId;
@@ -171,6 +194,8 @@ export const mlxRoutes: RouteModule = (deps) => [
    * usual `download` event, tagged so the MLX view can pick out its own.
    */
   route("POST", "/api/mlx/download", async ({ req, res }) => {
+    const why = unsupported();
+    if (why) return fail(res, 409, new Error(why));
     const body = await readBody(req);
     const ref = String(body.ref ?? "").trim();
     if (!ref) return fail(res, 400, new Error("ref is required"));

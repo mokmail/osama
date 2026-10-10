@@ -490,8 +490,10 @@ and delete, from the same dialog.
   them.
 - **No `/props`.** Fewer numbers than llama.cpp reports, and the app says so rather
   than inventing them.
-- **Apple silicon only.** MLX needs a Metal-capable macOS; on any other machine the
-  card explains that and stays out of the way.
+- **Apple silicon only.** MLX needs a Metal-capable macOS. On any other machine the
+  MLX card and the MLX provider button are simply not rendered, and every
+  `/api/mlx/*` route that would act answers `409` with the reason — `GET
+  /api/mlx/status` stays open, because that is how a client finds out.
 
 ---
 

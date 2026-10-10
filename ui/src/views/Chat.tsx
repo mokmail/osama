@@ -606,6 +606,17 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
 
   /** Switch provider. A switch never kills a running turn; it only changes
    *  which endpoint the *next* turn is sent to. */
+  /**
+   * The stored provider can say "mlx" on a machine that cannot run MLX — a profile
+   * carried over from another Mac, or a shared settings file. Without this the header
+   * would be wired to a picker with nothing behind it, so fall back to llama.cpp as
+   * soon as the status says MLX is unavailable here.
+   */
+  useEffect(() => {
+    if (provider === "mlx" && mlx && !mlx.support.supported) switchProvider("llamacpp");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, mlx]);
+
   function switchProvider(next: ChatProvider) {
     if (next === provider) return;
     setProvider(next);
@@ -1164,7 +1175,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   // page; once a conversation exists it docks to the bottom.
   const landing = messages.length === 0 && !startingServer;
 
-  const modelPicker = provider === "mlx" ? (
+  const modelPicker = provider === "mlx" && mlx?.support.supported !== false ? (
     <MlxPicker
       status={mlx}
       models={mlxModels}

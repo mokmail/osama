@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
-import { Boxes, FolderOpen, FolderPlus, HardDrive, MessagesSquare, RefreshCw, Server as ServerIcon, Sparkles, Square, Trash2 } from "lucide-react";
+import { Boxes, Download as DownloadIc, FolderOpen, FolderPlus, HardDrive, MessagesSquare, RefreshCw, Search as SearchIcon, Server as ServerIcon, Sparkles, Square, Trash2 } from "lucide-react";
 import { api, mlxApi } from "../lib/api";
 import type { LocalModel, ManagedProcess } from "../lib/types";
 import { Badge, Button, Card, CardHead, Console, Empty, Field, Spinner, usePoll, useToast } from "../components/ui";
@@ -9,7 +9,7 @@ import { bytes, fileBase, shortPath, timeAgo } from "../lib/format";
 import type { EventBus } from "../App";
 import type { ViewId } from "../App";
 import { isModelServer, servedModelPath } from "../lib/procs";
-import type { MlxModel, MlxStatus } from "../lib/types";
+import type { MlxModel, MlxRepoPlan, MlxSearchHit, MlxSource, MlxStatus } from "../lib/types";
 
 /**
  * One llama-server at a time — starting a model replaces whatever is serving.
@@ -47,12 +47,21 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
   // so it is loaded alongside the library rather than inside it.
   const [mlxModels, setMlxModels] = useState<MlxModel[]>([]);
   const [mlxStatus, setMlxStatus] = useState<MlxStatus | null>(null);
+  // The MLX catalogue: where models can be fetched from, and what is in flight.
+  const [mlxSources, setMlxSources] = useState<MlxSource[]>([]);
+  const [mlxSource, setMlxSource] = useState<string>(() => localStorage.getItem("osama.mlxSource") ?? "mlx");
+  const [mlxQuery, setMlxQuery] = useState("");
+  const [mlxHits, setMlxHits] = useState<MlxSearchHit[]>([]);
+  const [mlxNote, setMlxNote] = useState<string | null>(null);
+  const [mlxSearching, setMlxSearching] = useState(false);
+  const [mlxPlan, setMlxPlan] = useState<MlxRepoPlan | null>(null);
 
   const load = () => {
     api.models().then((r) => setModels(r.models)).catch(() => {});
     api.processes().then((r) => setProcs(r.processes)).catch(() => {});
     mlxApi.status().then(setMlxStatus).catch(() => {});
     mlxApi.models().then((r) => setMlxModels(r.models)).catch(() => {});
+    mlxApi.sources().then((r) => setMlxSources(r.sources)).catch(() => {});
   };
   usePoll(load, 5000);
 
@@ -120,6 +129,71 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
     try {
       await mlxApi.install();
       toast.push("info", "Installing the MLX environment — progress streams below.");
+    } catch (e) {
+      toast.push("err", (e as Error).message);
+    }
+  }
+
+  useEffect(() => { localStorage.setItem("osama.mlxSource", mlxSource); }, [mlxSource]);
+
+  /** What the MLX card's download strip is showing: only its own downloads. */
+  const mlxDownloads = bus.events
+    .filter((e) => e.type === "download" && e.data?.kind === "mlx")
+    .slice(-6)
+    .reverse();
+  const mlxFetching = mlxDownloads.some((e) => e.data?.stage === "start" || e.data?.stage === "downloading" || e.data?.stage === "file");
+  // A finished fetch is the moment the new directory becomes a model.
+  useEffect(() => {
+    if (mlxDownloads.some((e) => e.data?.stage === "done")) {
+      mlxApi.models().then((r) => setMlxModels(r.models)).catch(() => {});
+      mlxApi.status().then(setMlxStatus).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mlxDownloads.length, mlxDownloads[0]?.data?.stage]);
+
+  async function searchMlx() {
+    setMlxSearching(true);
+    setMlxNote(null);
+    setMlxPlan(null);
+    try {
+      const r = await mlxApi.search(mlxQuery, mlxSource);
+      setMlxHits(r.models);
+      setMlxNote(r.note ?? (r.models.length ? null : `Nothing matched “${mlxQuery}” in ${mlxSource}.`));
+    } catch (e) {
+      setMlxHits([]);
+      setMlxNote((e as Error).message);
+    } finally {
+      setMlxSearching(false);
+    }
+  }
+
+  async function planMlx(ref: string) {
+    setMlxPlan(null);
+    setMlxNote(null);
+    try {
+      const r = await mlxApi.repo(ref, mlxSource);
+      setMlxPlan(r.plan);
+    } catch (e) {
+      setMlxNote((e as Error).message);
+    }
+  }
+
+  async function fetchMlx(plan: MlxRepoPlan) {
+    try {
+      await mlxApi.download(plan.ref, mlxSource);
+      toast.push("info", `Fetching ${plan.ref} — progress below.`);
+      setMlxPlan(null);
+    } catch (e) {
+      toast.push("err", (e as Error).message);
+    }
+  }
+
+  async function removeMlx(m: MlxModel) {
+    if (!window.confirm(`Delete ${m.name} from ${m.dir}? The files are removed from disk.`)) return;
+    try {
+      await mlxApi.remove(m.dir);
+      toast.push("ok", `Removed ${m.name}.`);
+      load();
     } catch (e) {
       toast.push("err", (e as Error).message);
     }
@@ -414,7 +488,7 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
                 <Empty
                   icon={<Boxes size={26} />}
                   title="No MLX models on this machine"
-                  sub={`Drop an mlx-community conversion into ${mlxStatus.paths.home.replace(/\/mlx$/, "/models")} — a directory with config.json and .safetensors weights.`}
+                  sub="Search the catalogue below — Osama fetches the whole repo (config, tokenizer, weights) into its models directory."
                 />
               </div>
             ) : (
@@ -432,17 +506,148 @@ export function ModelsView({ bus, onNavigate }: { bus: EventBus; onNavigate: (v:
                       <span>{bytes(m.sizeBytes)}</span>
                       {m.contextLength ? <span>{Math.round(m.contextLength / 1024)}k ctx</span> : null}
                     </div>
-                    <Button
-                      size="sm"
-                      variant={mlxServing?.dir === m.dir ? "ghost" : "primary"}
-                      disabled={busy}
-                      onClick={() => mlxChatWith(m)}
-                    >
-                      {busy && pending === `mlx:${m.dir}` ? <Spinner /> : <MessagesSquare size={13} />}
-                      {mlxServing?.dir === m.dir ? (loading ? "Loading…" : "Open chat") : "Serve with MLX"}
-                    </Button>
+                    <div className="row" style={{ gap: 8, alignItems: "center" }}>
+                      <Button
+                        size="sm"
+                        variant={mlxServing?.dir === m.dir ? "ghost" : "primary"}
+                        disabled={busy}
+                        onClick={() => mlxChatWith(m)}
+                      >
+                        {busy && pending === `mlx:${m.dir}` ? <Spinner /> : <MessagesSquare size={13} />}
+                        {mlxServing?.dir === m.dir ? (loading ? "Loading…" : "Open chat") : "Serve with MLX"}
+                      </Button>
+                      {m.origin === "models-dir" && (
+                        <Button size="sm" variant="ghost" title="Delete this model's files from disk" onClick={() => void removeMlx(m)}>
+                          <Trash2 size={13} />
+                        </Button>
+                      )}
+                    </div>
                   </div>
                 ))}
+              </div>
+            )}
+
+            {mlxStatus.runtime.ready && (
+              <div style={{ marginTop: 16 }}>
+                <div className="hr" />
+                <div className="row wrap" style={{ gap: 8, alignItems: "center", marginBottom: 8 }}>
+                  <span className="small muted" style={{ fontWeight: 600 }}>Get models</span>
+                  <select
+                    className="select"
+                    style={{ maxWidth: 220 }}
+                    value={mlxSource}
+                    onChange={(e) => { setMlxSource(e.target.value); setMlxHits([]); setMlxPlan(null); setMlxNote(null); }}
+                    aria-label="MLX source"
+                  >
+                    {mlxSources.map((src) => (
+                      <option key={src.id} value={src.id}>{src.label}</option>
+                    ))}
+                  </select>
+                  {(mlxSources.find((x) => x.id === mlxSource)?.searchable ?? true) ? (
+                    <>
+                      <input
+                        className="input"
+                        style={{ flex: 1, minWidth: 200 }}
+                        value={mlxQuery}
+                        spellCheck={false}
+                        placeholder="search the MLX catalogue — e.g. Qwen3, gemma, Llama-3.2"
+                        onChange={(e) => setMlxQuery(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter") { e.stopPropagation(); void searchMlx(); } }}
+                      />
+                      <Button size="sm" disabled={mlxSearching} onClick={() => void searchMlx()}>
+                        {mlxSearching ? <Spinner /> : <SearchIcon size={13} />} Search
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <input
+                        className="input"
+                        style={{ flex: 1, minWidth: 220 }}
+                        value={mlxQuery}
+                        spellCheck={false}
+                        placeholder={mlxSource === "hf-mirror" ? "owner/repo — fetched through hf-mirror.com" : "owner/repo, or a huggingface.co link"}
+                        onChange={(e) => setMlxQuery(e.target.value)}
+                        onKeyDown={(e) => { if (e.key === "Enter" && mlxQuery.trim()) { e.stopPropagation(); void planMlx(mlxQuery.trim()); } }}
+                      />
+                      <Button size="sm" disabled={!mlxQuery.trim()} onClick={() => void planMlx(mlxQuery.trim())}>
+                        <SearchIcon size={13} /> Look up
+                      </Button>
+                    </>
+                  )}
+                </div>
+                <div className="faint small" style={{ marginBottom: 8 }}>
+                  {mlxSources.find((x) => x.id === mlxSource)?.note}
+                </div>
+
+                {mlxNote && <div className="help" style={{ marginBottom: 8 }}>{mlxNote}</div>}
+
+                {mlxPlan && (
+                  <div className="card card-pad" style={{ marginBottom: 10 }}>
+                    <div className="row wrap" style={{ gap: 10, alignItems: "center" }}>
+                      <span className="mono small" style={{ flex: 1, minWidth: 160 }}>{mlxPlan.ref}</span>
+                      {mlxPlan.quantization?.bits ? <Badge kind="accent">{mlxPlan.quantization.bits}-bit{mlxPlan.quantization.groupSize ? ` g${mlxPlan.quantization.groupSize}` : ""}</Badge> : null}
+                      {mlxPlan.contextLength ? <Badge>{Math.round(mlxPlan.contextLength / 1024)}k ctx</Badge> : null}
+                      {mlxPlan.architecture && <Badge>{mlxPlan.architecture}</Badge>}
+                      <Badge>{bytes(mlxPlan.weightsBytes)} weights</Badge>
+                      <Badge>{mlxPlan.files.length} files · {bytes(mlxPlan.totalBytes)}</Badge>
+                      {mlxPlan.gated && <Badge kind="warn">gated</Badge>}
+                    </div>
+                    <div className="row wrap" style={{ gap: 9, marginTop: 10, alignItems: "center" }}>
+                      <Button size="sm" variant="primary" disabled={mlxFetching || mlxSearching} onClick={() => void fetchMlx(mlxPlan)}>
+                        {mlxFetching ? <Spinner /> : <DownloadIc size={13} />} Fetch {bytes(mlxPlan.totalBytes)}
+                      </Button>
+                      <Button size="sm" variant="ghost" onClick={() => setMlxPlan(null)}>Cancel</Button>
+                      <span className="faint small">
+                        support files first, weights last — the model appears here only once it is whole
+                      </span>
+                    </div>
+                  </div>
+                )}
+
+                {mlxHits.length > 0 && (
+                  <div style={{ maxHeight: 280, overflowY: "auto", border: "1px solid var(--border)" }}>
+                    {mlxHits.map((h) => (
+                      <button
+                        key={`${h.source}:${h.ref}`}
+                        type="button"
+                        className="dirow-main"
+                        style={{ width: "100%", padding: "8px 10px", borderBottom: "1px solid var(--border)" }}
+                        onClick={() => { setMlxQuery(h.ref); void planMlx(h.ref); }}
+                        title="See what fetching this costs"
+                      >
+                        <span className="row" style={{ gap: 10, alignItems: "center", flex: 1, minWidth: 0 }}>
+                          <span className="dirow-name" style={{ fontWeight: 500 }}>{h.name}</span>
+                          {h.author && <span className="faint small">{h.author}</span>}
+                          {h.tags.slice(0, 2).map((t) => <Badge key={t}>{t}</Badge>)}
+                          <span style={{ flex: 1 }} />
+                          {typeof h.downloads === "number" && <span className="faint small mono">{h.downloads.toLocaleString()} ↓</span>}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {mlxDownloads.length > 0 && (
+                  <div style={{ marginTop: 10 }}>
+                    {mlxDownloads.map((e, i) => {
+                      const d = e.data ?? {};
+                      const pct = d.total ? Math.round(((d.received ?? 0) / d.total) * 100) : null;
+                      const label = d.stage === "error"
+                        ? `${d.repo}: ${String(d.error ?? "failed").slice(0, 120)}`
+                        : d.stage === "done"
+                          ? `${d.repo} — fetched`
+                          : `${d.repo}${d.file ? ` · ${d.file}` : ""}${d.index && d.count ? ` (${d.index}/${d.count})` : ""}`;
+                      return (
+                        <div key={`${d.id ?? i}-${d.file ?? d.stage}`} className="small" style={{ marginBottom: 4 }}>
+                          <span className={d.stage === "error" ? "" : "faint"} style={d.stage === "error" ? { color: "var(--warn)" } : undefined}>
+                            {label}
+                          </span>
+                          {pct !== null && d.stage === "downloading" && <span className="faint mono small"> · {pct}%</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
             )}
           </Card>

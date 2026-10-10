@@ -328,10 +328,18 @@ export function killAllProcesses(): number {
 /** Run a tool to completion and capture stdout/stderr (for bench, quantize, …). */
 export type EngineKind = "llama.cpp" | "mlx" | "unknown";
 
-/** The process Osama started for a base URL, if it is still on record. */
+/**
+ * The live process Osama started for a base URL.
+ *
+ * `listProcesses()` also returns finished records, and a *stopped* server must not
+ * describe what is being served any more: its argv would still say "this model",
+ * which is how a finished process kept a model "in use" and un-deletable.
+ */
 function processForServer(baseUrl: string): ManagedProcessInfo | undefined {
   const url = baseUrl.replace(/\/+$/, "");
-  return listProcesses().find((p) => (p.url ?? "").replace(/\/+$/, "") === url);
+  return listProcesses().find(
+    (p) => (p.status === "running" || p.status === "starting") && (p.url ?? "").replace(/\/+$/, "") === url,
+  );
 }
 
 /**

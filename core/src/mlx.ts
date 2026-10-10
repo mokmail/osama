@@ -2,7 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import { childEnv, engineKindForServer, servedModelForServer } from "./processes.js";
+import { childEnv, engineKindForServer, listProcesses, servedModelForServer } from "./processes.js";
+import { downloadFile } from "./downloader.js";
 
 /** Local alias: keeps the import list at the top of this module readable. */
 const mlxProcessHelpers = { engineKindForServer, servedModelForServer };
@@ -379,10 +380,20 @@ function readJson(file: string): any | undefined {
   }
 }
 
+/**
+ * Written while a repo is being fetched, removed when it is complete.
+ *
+ * A multi-file model is unusable until the last shard lands, and a directory that
+ * *looks* like a model half-way through would be listed, offered, and then fail at
+ * load time. The marker is the difference between "partly here" and "a model".
+ */
+export const MLX_INCOMPLETE = ".osama-incomplete";
+
 /** An MLX model is a directory: a config and at least one safetensors shard. */
 export function isMlxModelDir(dir: string): boolean {
   try {
     if (!fs.statSync(dir).isDirectory()) return false;
+    if (fs.existsSync(path.join(dir, MLX_INCOMPLETE))) return false;
     if (!fs.existsSync(path.join(dir, "config.json"))) return false;
     return fs.readdirSync(dir).some((f) => f.endsWith(".safetensors"));
   } catch {
@@ -625,4 +636,359 @@ export async function probeMlxServer(baseUrl: string, timeoutMs = 4000): Promise
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+
+/* ------------------------------------------------------------------ sources */
+
+/**
+ * Where MLX models come from.
+ *
+ * MLX conversions are *safetensors* directories, so none of the GGUF sources
+ * apply: HF is the only catalogue that matters, and it splits into the two
+ * publishers that actually do the conversions plus the general `mlx` tag. The
+ * mirror is here because a blocked network is a real case, but it is honest about
+ * being download-only — hf-mirror.com serves files, not the search API.
+ */
+export type MlxSourceId = "mlx" | "mlx-community" | "lmstudio-community" | "hf-mirror" | "ref";
+
+export interface MlxSource {
+  id: MlxSourceId;
+  label: string;
+  note: string;
+  /** whether this source can be searched, or only pasted into */
+  searchable: boolean;
+}
+
+export const MLX_SOURCES: MlxSource[] = [
+  {
+    id: "mlx",
+    label: "Hugging Face · mlx",
+    note: "every repo tagged mlx — mlx-community, lmstudio-community and individual publishers, by downloads",
+    searchable: true,
+  },
+  {
+    id: "mlx-community",
+    label: "mlx-community",
+    note: "the reference MLX conversions, published by Apple's community org",
+    searchable: true,
+  },
+  {
+    id: "lmstudio-community",
+    label: "lmstudio-community",
+    note: "LM Studio's own MLX conversions, named …-MLX-4bit / -8bit",
+    searchable: true,
+  },
+  {
+    id: "hf-mirror",
+    label: "HF mirror",
+    note: "the same files through hf-mirror.com when huggingface.co is unreachable — download only, no search",
+    searchable: false,
+  },
+  {
+    id: "ref",
+    label: "Repo id or link",
+    note: "paste any owner/repo, or a huggingface.co model link, to fetch it directly",
+    searchable: false,
+  },
+];
+
+export function mlxSources(): MlxSource[] {
+  return MLX_SOURCES;
+}
+
+/** The host a source reads from. Search always uses HF: the mirror has no API. */
+function mlxBase(source: MlxSourceId = "mlx"): string {
+  return source === "hf-mirror" ? "https://hf-mirror.com" : "https://huggingface.co";
+}
+
+function hfAuth(): Record<string, string> {
+  const token = process.env.HF_TOKEN?.trim();
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
+export interface MlxSearchHit {
+  ref: string;
+  name: string;
+  author?: string;
+  downloads?: number;
+  likes?: number;
+  updatedAt?: string;
+  tags: string[];
+  url: string;
+  source: MlxSourceId;
+}
+
+/**
+ * Search the MLX catalogue.
+ *
+ * `filter=mlx` is the Hub's own library tag for these conversions, so this finds
+ * every publisher of them rather than one org's naming convention. The two org
+ * sources add `author=`, which is what makes "more sources" mean something
+ * different from "the same list, filtered".
+ */
+export async function searchMlxModels(
+  query: string,
+  opts: { source?: MlxSourceId; limit?: number } = {},
+): Promise<{ models: MlxSearchHit[]; note?: string; errors: string[] }> {
+  const source = opts.source ?? "mlx";
+  const errors: string[] = [];
+  if (source === "hf-mirror" || source === "ref") {
+    return { models: [], note: `${source === "hf-mirror" ? "The mirror" : "A pasted reference"} is fetched directly — there is nothing to search.`, errors };
+  }
+  const limit = Math.max(1, Math.min(60, opts.limit ?? 24));
+  const params = new URLSearchParams({
+    filter: "mlx",
+    sort: "downloads",
+    direction: "-1",
+    limit: String(limit),
+    full: "false",
+  });
+  if (source === "mlx-community" || source === "lmstudio-community") params.set("author", source);
+  if (query.trim()) params.set("search", query.trim());
+
+  const res = await fetch(`https://huggingface.co/api/models?${params}`, {
+    headers: { accept: "application/json", "user-agent": "osama/0.1", ...hfAuth() },
+    signal: AbortSignal.timeout(20_000),
+  });
+  if (!res.ok) throw new Error(`Hugging Face search failed: HTTP ${res.status} ${res.statusText}`);
+  const rows = (await res.json()) as any[];
+  const models = rows.map((r) => {
+    const ref: string = r.id ?? r.modelId;
+    return {
+      ref,
+      name: ref.split("/").pop() ?? ref,
+      author: r.author ?? ref.split("/")[0],
+      downloads: r.downloads,
+      likes: r.likes,
+      updatedAt: r.lastModified ?? r.createdAt,
+      tags: (r.tags ?? []).filter((t: string) => !["transformers", "safetensors"].includes(t)).slice(0, 6),
+      url: `https://huggingface.co/${ref}`,
+      source,
+    };
+  });
+  return { models, errors };
+}
+
+/* --------------------------------------------------------------- repo plan */
+
+export interface MlxRepoServed {
+  path: string;
+  size: number;
+  /** weights (a safetensors shard) or a file the runtime needs alongside them */
+  kind: "weights" | "config" | "tokenizer" | "other";
+  required: boolean;
+}
+
+export interface MlxRepoPlan {
+  ref: string;
+  url: string;
+  source: MlxSourceId;
+  files: MlxRepoServed[];
+  /** bytes of safetensors weights */
+  weightsBytes: number;
+  /** bytes of everything that will be fetched */
+  totalBytes: number;
+  gated: boolean;
+  quantization?: MlxQuantization;
+  contextLength?: number;
+  architecture?: string;
+  /** files that would be skipped, with the reason */
+  skipped: Array<{ path: string; reason: string }>;
+}
+
+/** A model repo, or a link to one, reduced to `owner/repo`. */
+export function normaliseMlxRef(input: string): string {
+  const raw = input.trim().replace(/\/+$/, "");
+  const m = /^https?:\/\/(?:www\.)?(?:huggingface\.co|hf-mirror\.com)\/([^/]+\/[^/?#]+)/i.exec(raw);
+  if (m) return m[1]!;
+  if (/^[\w.-]+\/[\w.-]+$/.test(raw)) return raw;
+  throw new Error(`that is not a model reference — expected owner/repo, or a huggingface.co link`);
+}
+
+/** Files worth fetching. Docs, images and training leftovers are not. */
+function classifyMlxFile(p: string): MlxRepoServed["kind"] | "skip" {
+  const lower = p.toLowerCase();
+  if (lower.endsWith(".safetensors")) return /(^|\/)adapters?\.safetensors$/.test(lower) ? "other" : "weights";
+  if (lower === "config.json" || lower.endsWith("/config.json")) return "config";
+  if (lower.startsWith("tokenizer") || /(^|\/)(vocab\.json|merges\.txt|special_tokens_map\.json|added_tokens\.json|chat_template\.jinja|tokenizer\.json|\.model)$/.test(lower)) {
+    return "tokenizer";
+  }
+  if (lower.endsWith("generation_config.json") || lower.endsWith("model.safetensors.index.json")) return "other";
+  return "skip";
+}
+
+/**
+ * What fetching a repo would involve, before fetching it.
+ *
+ * Two small API calls (the tree, and `config.json` for the quantisation and the
+ * window) — enough to show size, bits and context in the list, which is the
+ * difference between choosing a model and guessing at one.
+ */
+export async function planMlxRepo(input: string, opts: { source?: MlxSourceId } = {}): Promise<MlxRepoPlan> {
+  const ref = normaliseMlxRef(input);
+  const source = opts.source ?? "mlx";
+  const base = mlxBase(source);
+  const headers = { accept: "application/json", "user-agent": "osama/0.1", ...hfAuth() };
+
+  const [infoRes, treeRes] = await Promise.all([
+    fetch(`${base}/api/models/${ref}`, { headers, signal: AbortSignal.timeout(20_000) }),
+    fetch(`${base}/api/models/${ref}/tree/main?recursive=true`, { headers, signal: AbortSignal.timeout(20_000) }),
+  ]);
+  if (!treeRes.ok) {
+    if (treeRes.status === 401 || treeRes.status === 403) throw new Error(`${ref} is gated: accept its licence on Hugging Face and set HF_TOKEN, then retry`);
+    throw new Error(`${ref}: HTTP ${treeRes.status} ${treeRes.statusText}`);
+  }
+  const tree = (await treeRes.json()) as any[];
+  const info: any = infoRes.ok ? await infoRes.json().catch(() => ({})) : {};
+
+  const files: MlxRepoServed[] = [];
+  const skipped: Array<{ path: string; reason: string }> = [];
+  for (const e of tree) {
+    if (e.type !== "file") continue;
+    const path_: string = e.path;
+    const kind = classifyMlxFile(path_);
+    const size = Number(e.size ?? e.lfs?.size ?? 0);
+    if (kind === "skip") {
+      skipped.push({ path: path_, reason: "not needed to run the model" });
+      continue;
+    }
+    files.push({ path: path_, size, kind, required: kind !== "other" });
+  }
+  const weights = files.filter((f) => f.kind === "weights");
+  if (!weights.length) throw new Error(`${ref} has no safetensors weights — it is not an MLX model repo`);
+  if (!files.some((f) => f.kind === "config")) throw new Error(`${ref} has no config.json — an MLX directory needs it`);
+
+  // config.json is a few KB: read it now so the row can state bits and window.
+  let quant: MlxQuantization | undefined;
+  let contextLength: number | undefined;
+  let architecture: string | undefined;
+  try {
+    const cfgRes = await fetch(`${base}/${ref}/resolve/main/config.json`, { headers, signal: AbortSignal.timeout(15_000) });
+    if (cfgRes.ok) {
+      const cfg: any = await cfgRes.json();
+      const q = cfg.quantization ?? cfg.quantization_config;
+      if (q) quant = { bits: q.bits, groupSize: q.group_size ?? q.groupSize };
+      contextLength = cfg.max_position_embeddings ?? cfg.text_config?.max_position_embeddings;
+      architecture = Array.isArray(cfg.architectures) ? cfg.architectures[0] : cfg.model_type;
+    }
+  } catch {
+    /* the plan is still valid without these */
+  }
+
+  return {
+    ref,
+    url: `https://huggingface.co/${ref}`,
+    source,
+    files,
+    weightsBytes: weights.reduce((n, f) => n + f.size, 0),
+    totalBytes: files.reduce((n, f) => n + f.size, 0),
+    gated: Boolean(info.gated),
+    quantization: quant,
+    contextLength,
+    architecture,
+    skipped,
+  };
+}
+
+/* ---------------------------------------------------------------- download */
+
+export interface MlxDownloadEvent {
+  stage: "start" | "file" | "done" | "error";
+  file?: string;
+  index?: number;
+  count?: number;
+  received?: number;
+  total?: number;
+  dir?: string;
+  error?: string;
+}
+
+/** Where a repo's files live under the models dir (same convention as GGUFs). */
+export function mlxModelDirFor(ref: string): string {
+  return path.join(paths().models, ref.replace(/[\/\\]/g, "__"));
+}
+
+/**
+ * Fetch a whole MLX repo into the models dir.
+ *
+ * Support files first, weights last, each one atomically (the downloader writes
+ * `.part` and renames), with an in-progress marker for the directory so a
+ * half-fetched model is never discovered, listed or served. An interrupted
+ * download resumes: the marker stays until the last file lands.
+ */
+export async function downloadMlxRepo(
+  input: string,
+  opts: { source?: MlxSourceId; signal?: AbortSignal; onEvent?: (e: MlxDownloadEvent) => void } = {},
+): Promise<{ dir: string; files: number; bytes: number; model: MlxModel }> {
+  const plan = await planMlxRepo(input, { source: opts.source });
+  const dir = mlxModelDirFor(plan.ref);
+  fs.mkdirSync(dir, { recursive: true });
+  const marker = path.join(dir, MLX_INCOMPLETE);
+  fs.writeFileSync(marker, `fetching ${plan.ref} since ${new Date().toISOString()}\n`);
+
+  // Support first: a directory with weights but no tokenizer is not runnable, and
+  // the marker is cleared only after the last byte.
+  const ordered = [...plan.files].sort((a, b) => (a.kind === "weights" ? 1 : 0) - (b.kind === "weights" ? 1 : 0));
+  const say = (e: MlxDownloadEvent) => opts.onEvent?.(e);
+  say({ stage: "start", dir, count: ordered.length, total: plan.totalBytes });
+
+  let bytes = 0;
+  try {
+    for (let i = 0; i < ordered.length; i++) {
+      const f = ordered[i]!;
+      const dest = path.join(dir, f.path);
+      const url = `${mlxBase(opts.source ?? plan.source)}/${plan.ref}/resolve/main/${f.path}`;
+      say({ stage: "file", file: f.path, index: i + 1, count: ordered.length, total: f.size });
+      await downloadFile(url, dest, {
+        signal: opts.signal,
+        onProgress: (pr) => say({ stage: "file", file: f.path, index: i + 1, count: ordered.length, received: pr.received, total: pr.total ?? f.size }),
+      });
+      bytes += f.size;
+    }
+    fs.unlinkSync(marker);
+    say({ stage: "done", dir, count: ordered.length, total: bytes });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    say({ stage: "error", error: message });
+    throw err;
+  }
+  if (!isMlxModelDir(dir)) throw new Error(`fetched ${plan.ref}, but ${dir} still does not look like an MLX model`);
+  return { dir, files: ordered.length, bytes, model: describeMlxModel(dir) };
+}
+
+/* ------------------------------------------------------------------- delete */
+
+/** Is a running MLX server pointed at this directory? */
+export function mlxModelInUse(dir: string): boolean {
+  const target = path.resolve(dir);
+  return listProcesses().some((p) => {
+    // A stopped server no longer holds the weights: `listProcesses` includes
+    // finished records, and counting those made a model permanent.
+    if (p.status !== "running" && p.status !== "starting") return false;
+    if (!/mlx_lm/.test(`${p.tool} ${p.argv.join(" ")}`)) return false;
+    const model = p.argv.indexOf("--model");
+    if (model < 0) return false;
+    const value = p.argv[model + 1] ?? "";
+    return path.resolve(path.isAbsolute(value) ? value : path.join(p.cwd ?? ".", value)) === target;
+  });
+}
+
+/**
+ * Remove a model from disk.
+ *
+ * Three guards, because this is the one destructive action in the view: the
+ * directory must be a real MLX model, it must live *under* the models directory
+ * (so a path the user merely pointed at is never touched), and no running server
+ * may be reading it.
+ */
+export function removeMlxModel(dir: string): { removed: string } {
+  const target = path.resolve(dir);
+  const root = path.join(paths().models) + path.sep;
+  if (!isMlxModelDir(target)) throw new Error(`${target} is not an MLX model directory`);
+  if (!target.startsWith(root)) throw new Error(`${target} is outside ${paths().models} — Osama will not delete a directory it does not manage`);
+  if (mlxModelInUse(target)) throw new Error(`${target} is being served right now — stop the MLX server first`);
+  fs.rmSync(target, { recursive: true, force: true });
+  log.info(`removed MLX model ${target}`);
+  return { removed: target };
 }

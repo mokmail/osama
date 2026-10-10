@@ -892,3 +892,45 @@ export interface MlxServedInfo {
   models?: string[];
   error?: string;
 }
+
+export type MlxSourceId = "mlx" | "mlx-community" | "lmstudio-community" | "hf-mirror" | "ref";
+
+export interface MlxSource {
+  id: MlxSourceId;
+  label: string;
+  note: string;
+  searchable: boolean;
+}
+
+export interface MlxSearchHit {
+  ref: string;
+  name: string;
+  author?: string;
+  downloads?: number;
+  likes?: number;
+  updatedAt?: string;
+  tags: string[];
+  url: string;
+  source: MlxSourceId;
+}
+
+export interface MlxRepoServed {
+  path: string;
+  size: number;
+  kind: "weights" | "config" | "tokenizer" | "other";
+  required: boolean;
+}
+
+export interface MlxRepoPlan {
+  ref: string;
+  url: string;
+  source: MlxSourceId;
+  files: MlxRepoServed[];
+  weightsBytes: number;
+  totalBytes: number;
+  gated: boolean;
+  quantization?: MlxQuantization;
+  contextLength?: number;
+  architecture?: string;
+  skipped: Array<{ path: string; reason: string }>;
+}

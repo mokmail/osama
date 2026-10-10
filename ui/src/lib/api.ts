@@ -1,6 +1,9 @@
 import type {
   MlxModel,
+  MlxRepoPlan,
+  MlxSearchHit,
   MlxServedInfo,
+  MlxSource,
   MlxStatus,
   AgentEvent,
   AgentStats,
@@ -275,6 +278,15 @@ export const mlxApi = {
   serve: (body: Record<string, unknown>) =>
     post<{ process: ManagedProcess; command: string; stopped?: string[]; runtime: { source: string; mlxLmVersion?: string } }>("/api/mlx/serve", body),
   info: (baseUrl: string) => get<MlxServedInfo>(`/api/mlx/info?baseUrl=${encodeURIComponent(baseUrl)}`),
+  sources: () => get<{ sources: MlxSource[] }>("/api/mlx/sources"),
+  search: (q: string, source?: string, limit = 24) =>
+    get<{ models: MlxSearchHit[]; note?: string; errors: string[] }>(
+      `/api/mlx/search?q=${encodeURIComponent(q)}${source ? `&source=${encodeURIComponent(source)}` : ""}&limit=${limit}`,
+    ),
+  repo: (ref: string, source?: string) =>
+    get<{ plan: MlxRepoPlan }>(`/api/mlx/repo?ref=${encodeURIComponent(ref)}${source ? `&source=${encodeURIComponent(source)}` : ""}`),
+  download: (ref: string, source?: string) => post<{ id: string }>("/api/mlx/download", { ref, source }),
+  remove: (dir: string) => post<{ ok: boolean; removed: string }>("/api/mlx/remove", { dir }),
 };
 
 export const agentApi = {

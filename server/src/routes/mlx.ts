@@ -120,6 +120,83 @@ export const mlxRoutes: RouteModule = (deps) => [
     });
   }),
 
+  /** Where MLX models can come from. */
+  route("GET", "/api/mlx/sources", ({ res }) => {
+    json(res, 200, { sources: core.mlxSources() });
+  }),
+
+  /** Search the MLX catalogue (Hugging Face's `mlx` tag, or one publisher). */
+  route("GET", "/api/mlx/search", async ({ res, url }) => {
+    const q = url.searchParams.get("q") ?? "";
+    const source = (url.searchParams.get("source") ?? "mlx") as core.MlxSourceId;
+    const limit = Number(url.searchParams.get("limit") ?? 24);
+    try {
+      json(res, 200, await core.searchMlxModels(q, { source, limit }));
+    } catch (e) {
+      fail(res, 502, e);
+    }
+  }),
+
+  /** What one repo would cost to fetch — size, bits, window — before fetching it. */
+  route("GET", "/api/mlx/repo", async ({ res, url }) => {
+    const ref = url.searchParams.get("ref");
+    if (!ref) return fail(res, 400, new Error("ref is required"));
+    const source = (url.searchParams.get("source") ?? "mlx") as core.MlxSourceId;
+    try {
+      json(res, 200, { plan: await core.planMlxRepo(ref, { source }) });
+    } catch (e) {
+      fail(res, 422, e);
+    }
+  }),
+
+  /**
+   * Fetch a whole MLX repo into the models dir.
+   *
+   * Backgrounded like every other download: progress arrives on the bus under the
+   * usual `download` event, tagged so the MLX view can pick out its own.
+   */
+  route("POST", "/api/mlx/download", async ({ req, res }) => {
+    const body = await readBody(req);
+    const ref = String(body.ref ?? "").trim();
+    if (!ref) return fail(res, 400, new Error("ref is required"));
+    const source = (body.source ?? "mlx") as core.MlxSourceId;
+    const id = `mlx_${Date.now().toString(36)}`;
+    deps.broadcast("download", { id, kind: "mlx", repo: ref, stage: "start" });
+    core
+      .downloadMlxRepo(ref, {
+        source,
+        onEvent: (e) =>
+          deps.broadcast("download", {
+            id,
+            kind: "mlx",
+            repo: ref,
+            file: e.file,
+            stage: e.stage === "file" ? "downloading" : e.stage,
+            index: e.index,
+            count: e.count,
+            received: e.received,
+            total: e.total,
+            dir: e.dir,
+            error: e.error,
+          }),
+      })
+      .then((r) => deps.broadcast("download", { id, kind: "mlx", repo: ref, stage: "done", dir: r.dir, model: r.model }))
+      .catch((err) => deps.broadcast("download", { id, kind: "mlx", repo: ref, stage: "error", error: String(err?.message ?? err) }));
+    json(res, 202, { id });
+  }),
+
+  /** Delete a downloaded model. Guarded in core: MLX model, under the models dir, not in use. */
+  route("POST", "/api/mlx/remove", async ({ req, res }) => {
+    const body = await readBody(req);
+    const dir = String(body.dir ?? "");
+    if (!dir) return fail(res, 400, new Error("dir is required"));
+    try {
+      json(res, 200, { ok: true, ...core.removeMlxModel(dir) });
+    } catch (e) {
+      fail(res, 409, e);
+    }
+  }),
+
   /** What an MLX server is serving — from `/v1/models`, since there is no `/props`. */
   route("GET", "/api/mlx/info", async ({ res, url }) => {
     const baseUrl = url.searchParams.get("baseUrl");

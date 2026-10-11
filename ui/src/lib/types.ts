@@ -107,6 +107,14 @@ export interface ParamSpec {
   advanced?: boolean;
   /** the tool cannot run without it */
   required?: boolean;
+  /** the value is a list; emitted as one comma-joined argument */
+  joinCommas?: boolean;
+  /** the value is a list; emitted as one flag followed by separate words */
+  joinSpace?: boolean;
+  /** an enum whose options are whole argv fragments rather than `flag value` */
+  enumArgv?: Record<string, string[]>;
+  /** other param keys that must be set before this one is emitted */
+  requires?: string[];
 }
 
 export interface ToolSpec {
@@ -120,6 +128,8 @@ export interface ToolSpec {
   mode: "process" | "oneshot";
   /** which engine runs it: llama.cpp (default) or MLX, Apple silicon only */
   engine?: "llamacpp" | "mlx";
+  /** mlx-lm extras this tool cannot start without (lm-eval, datasets) */
+  extras?: Array<"evaluate" | "datasets">;
   params: ParamSpec[];
 }
 
@@ -885,11 +895,37 @@ export interface MlxModel {
   servableNote?: string;
 }
 
+export interface MlxExtras {
+  /** the environment exists and answered the question */
+  checked: boolean;
+  /** lm-eval is importable — what `mlx_lm.evaluate` needs */
+  evaluate: boolean;
+  /** datasets is importable — what perplexity's data loader needs */
+  datasets: boolean;
+  python?: string;
+  detail: string;
+}
+
+/**
+ * What a server can do about tool calls (GET /api/agent/toolcalls).
+ *
+ * `constrained` is the honest split: llama.cpp turns the guided envelope into a grammar
+ * via `json_schema`, every other engine can only be asked for it.
+ */
+export interface ToolCallCapability {
+  engine: string;
+  constrained: boolean;
+  note: string;
+  modes: Array<{ id: string; label: string; note: string }>;
+}
+
 export interface MlxStatus {
   support: MlxSupport;
   runtime: MlxRuntime;
   paths: { home: string; venv: string; bin: string; python: string; server: string };
   models: number;
+  /** mlx-lm's evaluation extras: without them two MLX tools cannot start at all */
+  extras: MlxExtras;
 }
 
 export interface MlxServedInfo {
@@ -946,4 +982,43 @@ export interface MlxRepoPlan {
   /** the sentence to show when it is not servable */
   warning?: string;
   skipped: Array<{ path: string; reason: string }>;
+}
+
+/* ------------------------------------------------- first-run recommendation */
+
+export type RecommendEngine = "llama.cpp" | "mlx";
+
+export interface RecommendationOffer {
+  id: string;
+  engine: RecommendEngine;
+  kind: "gguf" | "mlx";
+  label: string;
+  ref: string;
+  /** GGUF: the one file to fetch. MLX fetches the whole repo. */
+  file?: string;
+  /** the size read from the app's own plan endpoint — the only size shown */
+  sizeBytes?: number;
+  paramsB: number;
+  quant: string;
+  rationale: string;
+  recommended: boolean;
+  /** GGUF: no llama.cpp build installed yet */
+  needsEngine?: boolean;
+  /** MLX: the runtime is not installed yet */
+  needsRuntime?: boolean;
+  /** set when the real size could not be read */
+  sizeNote?: string;
+}
+
+export interface Recommendation {
+  /** true when the library holds no servable GGUF and no MLX model */
+  needed: boolean;
+  offers: RecommendationOffer[];
+  mlxSupported: boolean;
+  mlxReady: boolean;
+  engineInstalled: boolean;
+  totalMemBytes: number;
+  platform: string;
+  arch: string;
+  note?: string;
 }

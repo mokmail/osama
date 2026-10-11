@@ -31,6 +31,8 @@ export interface PersistedChatState {
   messages: StoredMessage[];
   agentic: boolean;
   approvalMode: "ask" | "auto";
+  /** How the agent asks for tool calls: native, guided JSON, or none. */
+  toolMode?: "auto" | "guided" | "off";
   systemPrompt: string;
   temperature: number;
   topP: number;

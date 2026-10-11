@@ -347,6 +347,165 @@ export async function installRuntime(onEvent: (e: InstallEvent) => void): Promis
   }
 }
 
+/* ------------------------------------------------------------------- extras */
+
+/**
+ * The two things mlx-lm does NOT install for you.
+ *
+ * `mlx_lm.evaluate` imports lm-evaluation-harness at module level and
+ * `mlx_lm.perplexity`'s data loader imports `datasets` — both live in mlx-lm's own
+ * extras (`mlx-lm[evaluate,train]`). The first fails before it parses a single
+ * argument, so without this probe the tool's whole failure reads as a Python
+ * traceback about a package the user never chose to install. Probing costs one
+ * short-lived interpreter (~1-2s), cached, and it is the only way to answer "can
+ * this run here?" honestly.
+ */
+export interface MlxExtras {
+  /** the environment exists and answered the question */
+  checked: boolean;
+  /** lm-eval is importable — what `mlx_lm.evaluate` needs */
+  evaluate: boolean;
+  /** datasets is importable — what perplexity's loader needs */
+  datasets: boolean;
+  python?: string;
+  detail: string;
+}
+
+const EXTRAS_PROBE = `
+mods = []
+for name in ("lm_eval", "datasets"):
+    try:
+        __import__(name)
+        mods.append(name)
+    except Exception:
+        pass
+print(",".join(mods))
+`;
+
+/** Run an interpreter and capture what it printed. */
+function capture(cmd: string, argv: string[], timeoutMs = 120_000): Promise<{ code: number; out: string }> {
+  return new Promise((resolve) => {
+    let out = "";
+    let done = false;
+    const finish = (code: number) => {
+      if (done) return;
+      done = true;
+      resolve({ code, out: out.trim() });
+    };
+    let child;
+    try {
+      child = spawn(cmd, argv, { env: childEnv(mlxProcessEnv()) });
+    } catch {
+      return finish(-1);
+    }
+    const timer = setTimeout(() => {
+      child?.kill();
+      finish(-1);
+    }, timeoutMs);
+    child.stdout?.on("data", (d) => (out += String(d)));
+    child.stderr?.on("data", (d) => (out += String(d)));
+    child.on("error", () => {
+      clearTimeout(timer);
+      finish(-1);
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      finish(code ?? -1);
+    });
+  });
+}
+
+let extrasCache: { at: number; value: MlxExtras } | null = null;
+const EXTRAS_TTL = 60_000;
+
+/** Which of mlx-lm's extras are importable in Osama's environment. */
+export async function probeMlxExtras(opts: { refresh?: boolean } = {}): Promise<MlxExtras> {
+  const support = mlxSupport();
+  if (!support.supported) {
+    return { checked: false, evaluate: false, datasets: false, detail: support.reason ?? "MLX is not supported on this machine." };
+  }
+  if (extrasCache && !opts.refresh && Date.now() - extrasCache.at < EXTRAS_TTL) return extrasCache.value;
+
+  const remember = (value: MlxExtras) => {
+    extrasCache = { at: Date.now(), value };
+    return value;
+  };
+  const p = mlxPaths();
+  if (!fs.existsSync(p.python)) {
+    return remember({ checked: false, evaluate: false, datasets: false, detail: "Osama's MLX environment has not been built yet." });
+  }
+  const { code, out } = await capture(p.python, ["-c", EXTRAS_PROBE]);
+  if (code !== 0) {
+    return remember({
+      checked: false,
+      evaluate: false,
+      datasets: false,
+      python: p.python,
+      detail: out.split("\n").filter(Boolean).slice(-1)[0] ?? "the MLX interpreter could not be asked",
+    });
+  }
+  const have = new Set(out.split(/[\s,]+/).filter(Boolean));
+  const missing = [...(have.has("lm_eval") ? [] : ["lm-eval"]), ...(have.has("datasets") ? [] : ["datasets"])];
+  return remember({
+    checked: true,
+    evaluate: have.has("lm_eval"),
+    datasets: have.has("datasets"),
+    python: p.python,
+    detail: missing.length ? `Not installed in the MLX environment: ${missing.join(", ")}.` : "mlx-lm's evaluation extras are installed.",
+  });
+}
+
+/** Which of the named extras are absent, or null when it cannot be determined. */
+export async function mlxMissingExtras(needs: Array<"evaluate" | "datasets">): Promise<Array<"evaluate" | "datasets"> | null> {
+  const extras = await probeMlxExtras();
+  if (!extras.checked) return null;
+  return needs.filter((n) => (n === "evaluate" ? !extras.evaluate : !extras.datasets));
+}
+
+/**
+ * Add the extras a tool needs to the environment Osama built.
+ *
+ * `needs` decides what is installed, because the two are not the same size: `datasets`
+ * is the data loader perplexity needs, while `evaluate` is lm-evaluation-harness. Asking
+ * for one does not drag in the other. uv resolves them against the mlx-lm already in the
+ * venv rather than replacing it, and the streaming contract is the runtime install's, so
+ * the UI can show the same log.
+ */
+export async function installMlxExtras(
+  needs: Array<"evaluate" | "datasets">,
+  onEvent: (e: InstallEvent) => void,
+): Promise<MlxExtras> {
+  const support = mlxSupport();
+  if (!support.supported) throw new Error(support.reason ?? "MLX is not supported on this machine.");
+  const uv = findUv();
+  if (!uv) throw new Error("uv is required to install into the MLX environment — install it with `brew install uv`.");
+  const p = mlxPaths();
+  if (!fs.existsSync(p.python)) throw new Error("Osama's MLX environment has not been built yet — build it first.");
+
+  // mlx-lm's own extras, keyed by what they provide.
+  const wanted = [...new Set(needs)];
+  const extras = wanted.map((n) => (n === "evaluate" ? "evaluate" : "train")).join(",");
+  const spec = `mlx-lm[${extras}]`;
+
+  const say = (e: InstallEvent) => {
+    onEvent(e);
+    if (e.line) log.info(`mlx extras: ${e.line}`);
+  };
+
+  try {
+    say({ stage: "pip", line: `uv pip install --python ${p.python} ${spec}` });
+    const code = await run(uv, ["pip", "install", "--python", p.python, spec], (l) => say({ stage: "line", line: l }));
+    if (code !== 0) throw new Error(`uv pip install exited with code ${code}`);
+    const result = await probeMlxExtras({ refresh: true });
+    say({ stage: "done", line: result.detail });
+    return result;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    say({ stage: "error", error: message });
+    throw err;
+  }
+}
+
 /* ------------------------------------------------------------------- models */
 
 export interface MlxQuantization {

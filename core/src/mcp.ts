@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { osamaHome } from "./paths.js";
-import type { AgentToolSpec, ToolResult } from "./tools.js";
+import type { AgentToolSpec, ToolResult } from "./tools/index.js";
 
 /**
  * Model Context Protocol (MCP) client.

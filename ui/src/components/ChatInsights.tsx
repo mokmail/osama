@@ -37,7 +37,7 @@ const QUICK_PANEL_IDS: QuickPanelId[] = ["soul", "memory", "skills", "artifacts"
 export function ChatInsights({
   baseUrl, agentic, todos, refreshKey, messages, onToolSupport, onWorkspaceChange,
   systemPrompt, onSystemPrompt, temperature, onTemperature, topP, onTopP, maxTokens, onMaxTokens,
-  serverUrl, onServerUrl, apiKey, onApiKey, approvalMode, onApprovalMode,
+  serverUrl, onServerUrl, apiKey, onApiKey, approvalMode, onApprovalMode, toolMode, onToolMode,
   history, activeId, onNewChat, onOpenChat, onDeleteChat,
   focus, model, compactMessages, onCompactClick, compacting, lastCompaction,
   personality, onPersonality, livePrompt, contextModel,
@@ -56,6 +56,9 @@ export function ChatInsights({
   serverUrl: string; onServerUrl: (v: string) => void;
   apiKey: string; onApiKey: (v: string) => void;
   approvalMode: "ask" | "auto"; onApprovalMode: (v: "ask" | "auto") => void;
+  /** How the agent asks for tool calls: the engine's own format, the guided JSON
+   *  envelope, or none. The note under the select says what that is worth here. */
+  toolMode: "auto" | "guided" | "off"; onToolMode: (v: "auto" | "guided" | "off") => void;
   history: StoredChat[];
   activeId: string;
   onNewChat: () => void;
@@ -147,6 +150,7 @@ export function ChatInsights({
               serverUrl={serverUrl} onServerUrl={onServerUrl}
               apiKey={apiKey} onApiKey={onApiKey}
               approvalMode={approvalMode} onApprovalMode={onApprovalMode}
+              toolMode={toolMode} onToolMode={onToolMode}
             />
           )}
         </Modal>
@@ -798,7 +802,34 @@ function SettingsModal(props: {
   serverUrl: string; onServerUrl: (v: string) => void;
   apiKey: string; onApiKey: (v: string) => void;
   approvalMode: "ask" | "auto"; onApprovalMode: (v: "ask" | "auto") => void;
+  toolMode: "auto" | "guided" | "off"; onToolMode: (v: "auto" | "guided" | "off") => void;
 }) {
+  /**
+   * What the server on this URL can do about tool calls.
+   *
+   * Asked rather than assumed, because "guided" means two different things: llama.cpp
+   * turns the envelope into a grammar, mlx-lm — which has no such field — can only be
+   * asked for it. The note under the select says which one this user is getting.
+   */
+  const [capability, setCapability] = useState<{
+    engine: string;
+    constrained: boolean;
+    note: string;
+    modes: Array<{ id: string; label: string; note: string }>;
+  } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    agentApi
+      .toolCalls(props.serverUrl)
+      .then((c) => {
+        if (alive) setCapability(c);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, [props.serverUrl]);
+
   return (
     <div className="stack" style={{ gap: 10 }}>
       <label className="rpfield">
@@ -833,6 +864,22 @@ function SettingsModal(props: {
           <option value="auto">auto-approve</option>
         </select>
       </label>
+      <label className="rpfield">
+        <span>tool calls</span>
+        <select className="select" value={props.toolMode} onChange={(e) => props.onToolMode(e.target.value as "auto" | "guided" | "off")}>
+          <option value="auto">native tool calls</option>
+          <option value="guided">guided JSON</option>
+          <option value="off">no tools</option>
+        </select>
+      </label>
+      {/* What "guided" is worth is a fact about the engine, so it is asked for rather
+          than asserted: llama.cpp can put a grammar behind the envelope, mlx-lm cannot. */}
+      <div
+        className="modal-note"
+        style={capability && !capability.constrained && props.toolMode === "guided" ? { color: "var(--warn)" } : undefined}
+      >
+        {capability ? (capability.modes.find((m) => m.id === props.toolMode)?.note ?? capability.note) : "checking what this server can do…"}
+      </div>
     </div>
   );
 }

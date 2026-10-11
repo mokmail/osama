@@ -37,6 +37,7 @@ import type {
   ModelCard,
   OllamaModel,
   OllamaStatus,
+  Recommendation,
   ReleaseInfo,
   SeriesSample,
   ServerMetrics,
@@ -50,6 +51,7 @@ import type {
   ToolSpec,
   WorkspacesResponse,
   WorkspaceFile,
+  ToolCallCapability,
 } from "./types";
 
 /** In the browser the Vite dev server proxies /api; inside Tauri the shell
@@ -113,6 +115,8 @@ export const api = {
     ),
 
   models: () => get<{ models: LocalModel[] }>("/api/models"),
+  /** The first-run offer: a small model that suits this machine, or nothing to do. */
+  recommend: (refresh = false) => get<Recommendation>(`/api/recommend${refresh ? "?refresh=1" : ""}`),
   /** Search a folder (bounded, recursive) for GGUF files — the model picker. */
   findGgufs: (dir: string, opts: { depth?: number; max?: number } = {}) =>
     get<FindGgufResponse>(
@@ -292,6 +296,12 @@ export function subscribeEvents(onEvent: (e: { type: string; data: any; ts: numb
 export const mlxApi = {
   status: () => get<MlxStatus>("/api/mlx/status"),
   install: () => post<{ started: boolean }>("/api/mlx/install", {}),
+  /**
+   * mlx-lm's evaluation extras (lm-eval, datasets). Backgrounded like the runtime
+   * install: the answer comes from `GET /api/mlx/status` once it has finished. Ask for
+   * only what the tool needs — the harness and the data loader are not the same size.
+   */
+  extras: (needs: Array<"evaluate" | "datasets">) => post<{ started: boolean; extras: string[] }>("/api/mlx/extras", { extras: needs }),
   models: () => get<{ models: MlxModel[] }>("/api/mlx/models"),
   inspect: (dir: string) => get<{ model: MlxModel }>(`/api/mlx/model?dir=${encodeURIComponent(dir)}`),
   serve: (body: Record<string, unknown>) =>
@@ -310,6 +320,8 @@ export const mlxApi = {
 
 export const agentApi = {
   tools: () => get<AgentToolsResponse>("/api/agent/tools"),
+  /** What the server on this URL can do about tool calls — asked, not assumed. */
+  toolCalls: (baseUrl: string) => get<ToolCallCapability>(`/api/agent/toolcalls?baseUrl=${encodeURIComponent(baseUrl)}`),
   /** Harness inventory for the Dashboard: tools, skills, memory, jobs, MCP. */
   stats: () => get<AgentStats>("/api/agent/stats"),
   skills: () => get<{ skills: SkillMeta[]; roots: string[] }>("/api/agent/skills"),
@@ -481,6 +493,8 @@ export async function* streamAgent(
     personality?: string;
     /** This client's id for the run, so the UI can reattach after an unmount. */
     runId?: string;
+    /** How the agent asks for tool calls: the engine's own format, guided JSON, or none. */
+    toolMode?: "auto" | "guided" | "off";
     maxSteps?: number;
     temperature?: number;
     top_p?: number;

@@ -5,6 +5,7 @@ import {
 import { agentApi, api } from "../lib/api";
 import type { AgentStats, ServerMetrics, SeriesSample, StatsSnapshot, SystemResponse } from "../lib/types";
 import { Badge, Button, Card, CardHead, Console, usePoll } from "../components/ui";
+import { FirstRunCard, FIRST_RUN_DISMISS_KEY } from "../components/FirstRunCard";
 import { bytes, compactTokens, num, rate, sinceNow, timeAgo, uptime } from "../lib/format";
 import type { EventBus } from "../App";
 import type { ViewId } from "../App";
@@ -24,6 +25,17 @@ export function Dashboard({ system, bus, onNavigate }: { system: SystemResponse 
   // halves have a "tool" count and they are different things, so the dashboard
   // labels them apart instead of showing one ambiguous number.
   const [agent, setAgent] = useState<AgentStats | null>(null);
+
+  /**
+   * The first-run offer. "Not now" stores a localStorage flag so the card does
+   * not return on its own — and this is the way to ask for it again, from the
+   * Dashboard's own empty state, which is what makes the dismissal reversible.
+   */
+  const [forceFirstRun, setForceFirstRun] = useState(false);
+  const suggestModel = () => {
+    localStorage.removeItem(FIRST_RUN_DISMISS_KEY);
+    setForceFirstRun(true);
+  };
 
   const serverProc = stats?.processes.runningNow.find((p) => isModelServer(p));
   const serverUrl = serverProc?.url;
@@ -78,7 +90,9 @@ export function Dashboard({ system, bus, onNavigate }: { system: SystemResponse 
   return (
     <NavContext.Provider value={onNavigate}>
       <div className="stack">
-        <Hero stats={stats} serverUrl={serverUrl} onNavigate={onNavigate} />
+        <Hero stats={stats} serverUrl={serverUrl} onNavigate={onNavigate} onSuggest={suggestModel} />
+
+        <FirstRunCard bus={bus} onNavigate={onNavigate} forceShow={forceFirstRun} onDismissed={() => setForceFirstRun(false)} />
 
         <ServingStrip model={servedModel} url={serverUrl} metrics={metrics} />
 
@@ -224,9 +238,12 @@ function Panel({ title, right, children }: { title: string; right?: React.ReactN
 
 /* -------------------------------------------------------------------- hero */
 
-function Hero({ stats, serverUrl, onNavigate }: { stats: StatsSnapshot | null; serverUrl?: string; onNavigate: (v: ViewId) => void }) {
+function Hero({ stats, serverUrl, onNavigate, onSuggest }: { stats: StatsSnapshot | null; serverUrl?: string; onNavigate: (v: ViewId) => void; onSuggest: () => void }) {
   const score = stats?.health.score ?? null;
   const scoreTone = score === null ? "" : score >= 85 ? "ok" : score >= 60 ? "warn" : "danger";
+  // With an empty library the "model on first run" offer is the useful thing on
+  // this page, and this is where it can always be asked for again.
+  const emptyLibrary = stats !== null && stats.library.count === 0;
   return (
     <div style={{ paddingTop: 4 }}>
       <div className="row" style={{ justifyContent: "space-between", alignItems: "flex-end", gap: 24, flexWrap: "wrap" }}>
@@ -262,6 +279,11 @@ function Hero({ stats, serverUrl, onNavigate }: { stats: StatsSnapshot | null; s
         {stats && <Badge>{stats.library.count} models · {bytes(stats.library.totalBytes)}</Badge>}
         {stats && (stats.downloads.active > 0 ? <Badge kind="info">{stats.downloads.active} downloading</Badge> : <Badge>idle</Badge>)}
         <div className="spacer" style={{ flex: 1 }} />
+        {emptyLibrary && (
+          <Button size="sm" variant="ghost" onClick={onSuggest} title="Offer a small model that suits this machine">
+            Suggest a model
+          </Button>
+        )}
         <Button size="sm" variant="ghost" onClick={() => onNavigate("processes")}>Processes</Button>
         <Button size="sm" variant="ghost" onClick={() => onNavigate("engine")}>llama.cpp</Button>
       </div>

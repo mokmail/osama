@@ -230,6 +230,33 @@ export const modelRoutes: RouteModule = (deps) => [
       return fail(res, engine === "mlx" ? 409 : 400, e);
     }
     const runId = `run_${Date.now().toString(36)}`;
+    // A missing required value is not always a fast failure: mlx_lm.generate with no
+    // --model starts downloading mlx-lm's own default 3B model. Same rule as the form.
+    const lacking = core.missingRequired(toolId, body.values ?? {});
+    if (lacking.length) {
+      return fail(res, 400, new Error(`${spec.binary} needs ${lacking.join(", ")} before it can run.`));
+    }
+    /**
+     * Refuse, on the server, a tool whose packages are not installed.
+     *
+     * The UI already blocks it, but the UI being careful is not a contract: a client
+     * that posts here directly would get a Python traceback from an import that runs
+     * before the tool reads its own arguments, which names neither the tool nor the fix.
+     */
+    if (spec.extras?.length) {
+      const missing = await core.mlxMissingExtras(spec.extras);
+      if (missing && missing.length) {
+        return fail(
+          res,
+          409,
+          new Error(
+            `${spec.binary} needs mlx-lm's evaluation extras (${missing
+              .map((m) => (m === "evaluate" ? "lm-eval" : "datasets"))
+              .join(", ")}), which are not in Osama's MLX environment yet — install them with POST /api/mlx/extras.`,
+          ),
+        );
+      }
+    }
     deps.broadcast("run", { id: runId, tool: toolId, stage: "start", command: core.renderCommand(spec.binary, argv) });
     core
       .runToCompletion(binary, argv, {

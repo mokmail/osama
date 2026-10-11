@@ -281,6 +281,12 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
   const [agentic, setAgentic] = useState(false);
   const [agentTools, setAgentTools] = useState<AgentTool[]>([]);
   const [approvalMode, setApprovalMode] = useState<"ask" | "auto">("ask");
+  /**
+   * How the agent asks for tool calls this turn. Native is the default and unchanged;
+   * "guided" makes the model answer in one JSON envelope, which llama.cpp can enforce
+   * with a grammar and mlx-lm can only request (the settings panel says which).
+   */
+  const [toolMode, setToolMode] = useState<"auto" | "guided" | "off">("auto");
   const [toolSupport, setToolSupport] = useState<"full" | "none" | "unknown">("unknown");
   /** The current conversation's identity + the saved history list. */
   const [chatId, setChatId] = useState(() => newChatId());
@@ -343,6 +349,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       if (Array.isArray(saved.messages) && saved.messages.length && !messages.length) setMessages(saved.messages as Message[]);
       if (typeof saved.agentic === "boolean") setAgentic(saved.agentic);
       if (saved.approvalMode === "ask" || saved.approvalMode === "auto") setApprovalMode(saved.approvalMode);
+      if (saved.toolMode === "auto" || saved.toolMode === "guided" || saved.toolMode === "off") setToolMode(saved.toolMode);
       if (typeof saved.systemPrompt === "string") setSystemPrompt(saved.systemPrompt);
       if (typeof saved.temperature === "number") setTemperature(saved.temperature);
       if (typeof saved.topP === "number") setTopP(saved.topP);
@@ -387,6 +394,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       messages,
       agentic,
       approvalMode,
+      toolMode,
       systemPrompt,
       temperature,
       topP,
@@ -394,7 +402,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       interrupted: run.status.running && run.status.runId ? { runId: run.status.runId, at: Date.now(), note: "interrupted by a reload" } : null,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, agentic, approvalMode, systemPrompt, temperature, topP, maxTokens, run.status.running, run.status.runId]);
+  }, [messages, agentic, approvalMode, toolMode, systemPrompt, temperature, topP, maxTokens, run.status.running, run.status.runId]);
 
   useEffect(() => {
     if (!agentic || agentTools.length) return;
@@ -985,6 +993,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
       personality,
       activeSkills,
       approval: approvalMode,
+      toolMode,
       temperature,
       top_p: topP,
       ...(maxTokens === "" ? {} : { max_tokens: maxTokens as number }),
@@ -2018,6 +2027,7 @@ export function ChatView({ system, bus, onNavigate }: { system: SystemResponse |
             serverUrl={baseUrl} onServerUrl={setBaseUrl}
             apiKey={apiKey} onApiKey={setApiKey}
             approvalMode={approvalMode} onApprovalMode={setApprovalMode}
+            toolMode={toolMode} onToolMode={setToolMode}
             history={history}
             activeId={chatId}
             onNewChat={newChat}

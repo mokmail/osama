@@ -1,10 +1,11 @@
-import { executeTool, executeSchedulerTool, toolSchemas, toolByName, isSchedulerTool, type ToolResult, executeContextTool, isContextTool, QUESTION_TIMEOUT_MS, type TodoItem } from "./tools.js";
+import { executeTool, executeSchedulerTool, toolSchemas, toolByName, isSchedulerTool, type ToolResult, executeContextTool, isContextTool, QUESTION_TIMEOUT_MS, type TodoItem } from "./tools/index.js";
 import { appendEvents } from "./sessions.js";
 import { applyCompaction, planCompaction, planResultElision, summarizationPrompt } from "./compact.js";
 import { type ChatMessage, type Meter, measureContext } from "./context.js";
 import { createSteerQueue, delegateSubagent, type SteerQueue } from "./orchestr.js";
 import { buildPrompt, type BuiltPrompt } from "./prompt.js";
 import { logger } from "./logger.js";
+import { guidedInstruction, isGuided, parseGuided, toolNamesOf, type ToolMode } from "./toolcall.js";
 
 const log = logger("agent");
 
@@ -47,9 +48,18 @@ export interface AgentTransport {
     temperature?: number;
     top_p?: number;
     max_tokens?: number;
+    /**
+     * A hard decoding constraint for this request, when the engine can honour one.
+     * llama.cpp reads `json_schema` from the body and samples inside it; every other
+     * engine gets nothing, because a field a server ignores is not a guarantee.
+     */
+    constraint?: ToolCallConstraint | null;
     signal?: AbortSignal;
   }): AsyncGenerator<ModelChunk, void, unknown>;
 }
+
+/** The body fields that constrain decoding, per engine. See toolcall.ts. */
+export type ToolCallConstraint = { json_schema: Record<string, unknown> };
 
 export type AgentEvent =
   | { type: "assistant_delta"; text: string }
@@ -110,6 +120,18 @@ export interface RunAgentOptions {
   temperature?: number;
   top_p?: number;
   max_tokens?: number;
+  /**
+   * How tool calls are asked for: the engine's own format ("auto", the default), the
+   * JSON envelope ("guided"), or not at all ("off"). Set by the caller from the
+   * user's choice; the loop itself only knows how to ask and how to read the answer.
+   */
+  toolMode?: ToolMode;
+  /**
+   * The decoding constraint for guided mode, when the caller's engine can enforce one.
+   * Absent is not "no guided mode" — it is "asked for, not enforced", and the loop still
+   * checks the envelope it gets back.
+   */
+  toolConstraint?: ToolCallConstraint | null;
   /** Tokenizer + window for the context tools. Omitted when no model is running. */
   meter?: import("./context.js").Meter;
   /** Inject the memory block and the skill catalog into the system prompt. */
@@ -139,9 +161,9 @@ export interface RunAgentOptions {
   /** Durable session id: events are appended and session-query reads them. */
   sessionId?: string;
   /** ask_user_question hook; without it that tool reports unavailable. */
-  askUser?: import("./tools.js").ToolContext["askUser"];
+  askUser?: import("./tools/index.js").ToolContext["askUser"];
   /** web hooks for web_search / web_fetch. */
-  web?: import("./tools.js").WebAccess;
+  web?: import("./tools/index.js").WebAccess;
   /**
    * Compaction policy. 'auto' compacts when the request would overflow the
    * window, 'off' skips it (and the upstream may reject). An approval hook
@@ -164,7 +186,7 @@ export interface RunAgentOptions {
    * Scoped per-run so a scheduled job and an interactive chat can expose
    * different connected servers.
    */
-  extraTools?: import("./tools.js").AgentToolSpec[];
+  extraTools?: import("./tools/index.js").AgentToolSpec[];
   /**
    * Executes an MCP tool call by its namespaced name. Supplied by the caller
    * (the server), so core stays free of transport details. When absent, an MCP
@@ -284,7 +306,7 @@ export function parseArgs(raw: string): Record<string, unknown> {
  * the loop answer with a precise "missing required argument: path" the model
  * can correct, instead of a tool-specific error it has to guess at.
  */
-export function missingRequiredArg(name: string, args: Record<string, unknown>, extra?: import("./tools.js").AgentToolSpec[]): string | null {
+export function missingRequiredArg(name: string, args: Record<string, unknown>, extra?: import("./tools/index.js").AgentToolSpec[]): string | null {
   const spec = toolByName(name, extra);
   const params = spec?.parameters as { required?: unknown } | undefined;
   const required = Array.isArray(params?.required) ? (params!.required as unknown[]) : [];
@@ -313,7 +335,7 @@ export function missingRequiredArg(name: string, args: Record<string, unknown>, 
 export function coerceArgs(
   name: string,
   args: Record<string, unknown>,
-  extra?: import("./tools.js").AgentToolSpec[],
+  extra?: import("./tools/index.js").AgentToolSpec[],
 ): Record<string, unknown> {
   const spec = toolByName(name, extra);
   const props = (spec?.parameters as { properties?: Record<string, { type?: string }> } | undefined)?.properties;
@@ -384,6 +406,8 @@ export function accumulateToolCalls(
 
 export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEvent, void, unknown> {
   const maxSteps = opts.maxSteps ?? DEFAULT_MAX_STEPS;
+  const toolMode: ToolMode = opts.toolMode ?? "auto";
+  const guided = isGuided(toolMode);
 
   // Assemble the system prompt through the shared builder, so the agent, a
   // subagent and the UI's prompt inspector all see the same stack in the same
@@ -403,6 +427,10 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
     activeSkills: opts.activeSkills,
     workspace: true,
     scheduler: true,
+    // Guided mode states the tool catalogue in the prompt: llama.cpp refuses `tools`
+    // and `json_schema` in one request (see toolcall.ts), so the schemas travel as text
+    // and the wire carries only the grammar.
+    extra: guided ? [guidedInstruction(toolSchemas(opts.extraTools ?? []))] : undefined,
   });
 
   const systemFull = built.prompt;
@@ -419,7 +447,17 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
 
   /** The tool schemas are fixed for the run; build them once (built-ins + MCP). */
   const extraTools = opts.extraTools ?? [];
-  const tools = toolSchemas(extraTools);
+  /**
+   * Which schemas go on the wire.
+   *
+   *   auto    the native API: every schema, and the model's own tool-call format.
+   *   off     none — the user deciding this turn is a conversation, which is what stops
+   *           a small model reaching for a tool it does not need.
+   *   guided  none either, and not for the same reason: llama.cpp rejects `tools` next to
+   *           `json_schema` outright, so the catalogue was stated in the prompt instead
+   *           and the request carries only the constraint.
+   */
+  const tools = toolMode === "auto" ? toolSchemas(extraTools) : [];
   /** True when a name belongs to an injected (MCP) tool rather than a built-in. */
   const isExtraTool = (name: string): boolean => extraTools.some((t) => t.name === name);
 
@@ -550,6 +588,7 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
         temperature,
         top_p: opts.top_p,
         max_tokens: opts.max_tokens,
+        constraint: opts.toolConstraint ?? null,
         signal: opts.signal,
       })) {
         if (chunk.content) {
@@ -571,6 +610,35 @@ export async function* runAgent(opts: RunAgentOptions): AsyncGenerator<AgentEven
         type: "function" as const,
         function: { name: v.name ?? "", arguments: v.args || "{}" },
       }));
+
+    /**
+     * Guided mode: the answer arrives as a JSON envelope, so it is read back here —
+     * between the model's reply and the rest of the loop, which stays exactly as it was.
+     * A well-formed call becomes an ordinary `ToolCall` (same dispatch, same approvals,
+     * same events); an `{answer}` envelope becomes the reply; anything else is left
+     * alone and treated as prose, which is what the repair layer already handles.
+     *
+     * The name is checked against the tools this run actually declared. On llama.cpp the
+     * grammar makes an unknown name unrepresentable, but mlx-lm and unknown servers only
+     * *ask* for the envelope — there the check is the whole guarantee, and dispatching a
+     * name the model made up would be the failure this mode exists to prevent.
+     */
+    if (guided && calls.length === 0 && text.trim()) {
+      const nameOf = new Set(toolNamesOf(extraTools));
+      const env = parseGuided(text, (n) => nameOf.has(n));
+      if (env?.kind === "call") {
+        calls.push({
+          id: `call_${Math.random().toString(36).slice(2, 10)}`,
+          type: "function" as const,
+          function: { name: env.tool, arguments: JSON.stringify(env.args) },
+        });
+        // The envelope is the call, not something to show: record the turn as the
+        // tool call it was, exactly as a native tool-call reply is recorded.
+        text = "";
+      } else if (env?.kind === "answer") {
+        text = env.answer;
+      }
+    }
 
     // Record the assistant turn exactly as it arrived, so the next request has
     // the tool_calls the model is answering for.

@@ -298,6 +298,17 @@ export const agentRoutes: RouteModule = (deps) => {
         top_p: payload.top_p,
       };
       if (typeof payload.max_tokens === "number" && payload.max_tokens > 0) body.max_tokens = payload.max_tokens;
+      /**
+       * Guided mode's hard half, and only its hard half.
+       *
+       * `json_schema` is a real llama.cpp body field (it becomes a GBNF grammar), so the
+       * sampler cannot emit anything but the envelope. It is never sent to mlx-lm or to
+       * an unknown server: those ignore the field, and a request that looks constrained
+       * in the log while the model is free to answer anything is exactly the kind of
+       * false assurance this app refuses to give. The constraint that is sent is decided
+       * by the caller (see toolConstraintFor in core/toolcall.ts), not here.
+       */
+      core.applyConstraint(body, payload.constraint);
 
       const upstream = await fetch(`${ctx.base}/v1/chat/completions`, {
         method: "POST",
@@ -428,7 +439,30 @@ export const agentRoutes: RouteModule = (deps) => {
 
   return [
     // --- tools the model may call -------------------------------------------
-    route("GET", "/api/agent/tools", ({ res }) => {
+    /**
+   * What the server on `baseUrl` can do about tool calls.
+   *
+   * Asked by the Chat settings before it offers "guided": the answer decides the wording,
+   * because "the model is constrained" and "the model was asked nicely" are not the same
+   * promise and a select box cannot tell them apart on its own.
+   */
+  route("GET", "/api/agent/toolcalls", ({ res, url }) => {
+    const base = url.searchParams.get("baseUrl") ?? "";
+    const kind = base ? core.engineKindForServer(base) : "unknown";
+    const constrained = core.canConstrain(kind);
+    json(res, 200, {
+      engine: kind,
+      constrained,
+      note: core.constraintNote(kind, "guided"),
+      modes: [
+        { id: "auto", label: "Native tool calls", note: core.constraintNote(kind, "auto") },
+        { id: "guided", label: "Guided JSON", note: core.constraintNote(kind, "guided") },
+        { id: "off", label: "No tools", note: core.constraintNote(kind, "off") },
+      ],
+    });
+  }),
+
+  route("GET", "/api/agent/tools", ({ res }) => {
       // Built-in tools plus any live MCP tools, so the UI's Tools panel shows
       // exactly what the model can call right now.
       const mcp = core.mcpToolSpecs();
@@ -902,6 +936,20 @@ export const agentRoutes: RouteModule = (deps) => {
             await core.connectAll().catch(() => {});
           }
 
+          /**
+           * How this turn asks for tool calls, and how strongly the engine can insist.
+           *
+           * The mode is the user's choice (Chat settings); the constraint is a fact about
+           * the server answering this request. Keeping them apart is what lets the UI say
+           * "guided, and here it is enforced" or "guided, but mlx-lm cannot enforce it"
+           * instead of one word that means two different things.
+           */
+          const toolMode: core.ToolMode =
+            body.toolMode === "guided" || body.toolMode === "off" ? body.toolMode : "auto";
+          const engineKind = core.engineKindForServer(base);
+          const toolNames = core.toolNamesOf(core.mcpToolSpecs());
+          const toolConstraint = core.toolConstraintFor(engineKind, toolMode, toolNames);
+
           for await (const ev of core.runAgent({
             transport: openaiTransport({ base, apiKey }),
             model,
@@ -923,6 +971,8 @@ export const agentRoutes: RouteModule = (deps) => {
             ),
             top_p: typeof body.top_p === "number" ? Number(body.top_p) : undefined,
             max_tokens: typeof body.max_tokens === "number" ? Number(body.max_tokens) : undefined,
+            toolMode,
+            toolConstraint,
             meter: core.createMeter(base, { model }),
             injectMemory: body.memory !== false,
             injectSkills: body.skills !== false,

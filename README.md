@@ -318,7 +318,7 @@ Models page, so older links keep working.
 ### The llama.cpp tools
 
 Osama drives **fifteen** binaries from the Tools views, each generated from one
-catalogue (`core/src/commands.ts`) so adding a flag to the catalogue adds it to
+catalogue (`core/src/commands/`) so adding a flag to the catalogue adds it to
 the GUI. The release itself ships more than that (per-model CLIs, the unified
 `llama` front-end, `ggml-metal-tuning`); the dashboard counts coverage against
 the whole shipped set and reports how many of them are drivable:
@@ -610,15 +610,44 @@ page"):
 An empty final answer is retried once at temperature 0 rather than surfaced as
 "the model finished without saying anything".
 
+### Guided tool calls: making the malformed call impossible
+
+Everything above makes a bad call *recoverable*. Guided mode is the other half: the bad
+call is never generated. Chat settings → **Tool calls** has three positions:
+
+- **Native tool calls** (the default) — the model's own tool-call format, exactly as before.
+- **Guided JSON** — the model must answer with one envelope,
+  `{"tool": "<name>", "arguments": {…}}` or `{"answer": "<reply>"}`. The loop reads it back
+  and turns a well-formed call into an ordinary tool call — same dispatch, same approvals,
+  same events — so nothing downstream knows the difference.
+- **No tools** — the turn is a conversation; no schemas are sent, so a small model stops
+  reaching for a tool it does not need.
+
+What "guided" is worth depends on the engine, and the app says which of the two you got
+rather than using one word for both:
+
+- **llama.cpp enforces it.** `json_schema` in the request body becomes a GBNF grammar, so
+  the sampler cannot emit anything but the envelope — and the tool name is an `enum` of
+  the tools this run actually declared, which makes an invented tool name *unrepresentable*
+  rather than merely rejected.
+- **mlx-lm cannot, and does not pretend to.** Its OpenAI surface has no `response_format`,
+  `json_schema` or `grammar` field; the envelope is asked for in the prompt and checked on
+  arrival. The settings panel says exactly that instead of promising a guarantee the
+  runtime does not make.
+
+One rule holds on every engine: a reply naming a tool nobody declared is prose, never a
+dispatch.
+
 > Honest note: these rules and repairs make a small model *more* reliable, but
 > they do not make it good. A 3B model still over-calls tools. Use the largest
-> model your machine comfortably runs.
+> model your machine comfortably runs — or switch Tool calls to Guided JSON, which on
+> llama.cpp removes the malformed call rather than repairing it.
 
 ---
 
 ## The agent toolkit
 
-37 tools, registered in `core/src/tools.ts` and listed live at
+37 tools, registered in `core/src/tools/` and listed live at
 `GET /api/agent/tools`. Every one runs on your machine, so the jail is the
 security boundary for the whole subsystem.
 
@@ -1016,7 +1045,7 @@ Design principles, and why they are load-bearing:
 
 1. **Drive the real binaries.** Osama downloads official release archives and
    executes the actual tools. Nothing is reimplemented; nothing is simulated.
-2. **One source of truth for flags.** `core/src/commands.ts` declares every
+2. **One source of truth for flags.** `core/src/commands/` declares every
    option Osama exposes; the UI *is* generated from it. Adding a flag to the
    catalogue adds it to the GUI.
 3. **argv, never shell.** Commands are spawned as argument arrays, so a path
@@ -1076,26 +1105,47 @@ principles and the verified end-to-end run.
   two entries in the tool catalogue, so the forms, the streaming log and the result
   card come from the same machinery every llama.cpp tool uses. Every flag they emit
   was checked against the installed runtime's own `--help`.
+- **The rest of mlx-lm** — seven MLX tabs in the one tool catalogue: `fuse` (a trained
+  adapter folded into its base model, with an optional GGUF export), `evaluate` and
+  `perplexity` (the MLX half of the Evaluate page), `generate` (one prompt, one answer,
+  with the timings that make two builds comparable) and `upload`, plus `--upload-repo`
+  on `convert`. Two of them import lm-evaluation-harness and `datasets`, which mlx-lm
+  does not install by default: the form and the route both refuse such a run, explain
+  why, and install them into Osama's own environment on request.
+- **Guided tool calls** — a third position on the Chat's Tool calls setting, next to the
+  engine's own format and "no tools". The model answers in one envelope,
+  `{"tool": …, "arguments": …}` or `{"answer": …}`, and the loop reads it back into an
+  ordinary tool call. On llama.cpp `json_schema` turns that envelope into a grammar, so a
+  malformed call or an invented tool name cannot be generated at all; on mlx-lm it is
+  asked for and checked, and the settings say which of the two is in force. A reply naming
+  a tool nobody declared is never dispatched, on either engine.
+- **One large file split into a subsystem** — `core/src/tools.ts` was the last big file in
+  `core`: 2,000 lines holding the declarations the model is handed, the jail, the executors
+  for two families and the dispatch between them. It is `core/src/tools/` now — `spec`,
+  `jail`, `fs`, `net`, `state`, `scheduler`, `dispatch`, `index` — moved region by region
+  with a re-exporting index, so nothing that imported it had to change. The stale
+  `core/src/commands.ts` the earlier split left behind is gone too.
 - **Desktop shell** — Tauri 2 configuration for macOS, Linux and Windows.
 
 ### Next
 
-- **The rest of mlx-lm.** `convert` takes four flags Osama does not offer yet
-  (`--upload-repo`) and five siblings on the same page deserve a spec: `mlx_lm.fuse`
-  (an adapter into an MLX model), `mlx_lm.evaluate` and `mlx_lm.perplexity` (the MLX
-  half of the Evaluate page), `mlx_lm.generate` for a one-shot comparison. GGUF → MLX
-  waits on a `--gguf-path` flag mlx-lm 0.32 does not have.
+- **GGUF → MLX.** Still not possible, and now for a measured reason: mlx-lm reads a
+  Hugging Face model or an MLX folder, and the one `--gguf-path` flag it has is an
+  export destination — `mlx_lm.fuse --export-gguf` writes GGUF for llama, mistral and
+  mixtral only. Anything else would be a second converter, and it would not be
+  byte-faithful.
+- **MLX training.** `mlx_lm.lora` is the last mlx-lm command without a form. It is
+  hours long, so it wants a stop control and a resumable checkpoint story that the
+  one-shot runner deliberately does not have, and its `--config` YAML is a second input
+  language on top of the flags.
 - **A model on first run.** Osama ships no weights and makes you find them.
   A guided first-run that offers a small recommended model for your hardware
   would close the biggest gap between "installed" and "answering".
-- **Tool calling beyond small models.** The reliability work in
-  [Chat mode and Agent mode](#chat-mode-and-agent-mode) papers over the real
-  issue: a 3B model over-calls tools. Grammar-constrained tool calls, or a
-  guided/JSON-schema mode, would make small models dependable instead of merely
-  survivable.
-- **Finish splitting `core/src/tools.ts`.** `commands.ts` was already split into
-  `core/src/commands/` (`spec.ts`, `tools.ts`, `index.ts`); the 2000-line tool
-  registry has not been, and it is the last large single file in `core`.
+- **Tool calling beyond small models.** Guided mode removes the *malformed* call on
+  llama.cpp; what no grammar can fix is the *choice*. A 3B model still reaches for a tool
+  on a turn that needs none, and constraining the syntax does not constrain the judgement.
+  The next step there is offering fewer tools per turn — a shortlist picked from the
+  user's message — so the wrong choice is not available either.
 
 ### Later
 

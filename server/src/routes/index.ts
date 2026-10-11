@@ -7,6 +7,7 @@ import { mcpRoutes } from "./mcp.js";
 import { mlxRoutes } from "./mlx.js";
 import { modelRoutes } from "./models.js";
 import { ollamaRoutes } from "./ollama.js";
+import { recommendRoutes } from "./recommend.js";
 import { skillRoutes } from "./skills.js";
 import { systemRoutes } from "./system.js";
 import type { RouteDeps, RouteModule } from "../http.js";
@@ -24,6 +25,7 @@ export const MODULES: RouteModule[] = [
   identityRoutes,
   modelRoutes,
   hubRoutes,
+  recommendRoutes,
   ollamaRoutes,
   mlxRoutes,
   mcpRoutes,

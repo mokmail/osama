@@ -23,7 +23,7 @@ Osama is that interface.
 
 1. **Drive the real binaries.** Osama downloads official GitHub release archives and executes the actual
    tools. Nothing is reimplemented; nothing is simulated.
-2. **One source of truth for flags.** `core/src/commands.ts` declares every option Osama exposes; the UI
+2. **One source of truth for flags.** `core/src/commands/` declares every option Osama exposes; the UI
    *is generated from it*. Adding a flag to the catalogue adds it to the GUI.
 3. **argv, never shell.** Commands are spawned as argument arrays, so a path with spaces or a `;` can never
    be interpreted as shell syntax.

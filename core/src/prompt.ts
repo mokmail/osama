@@ -1,7 +1,7 @@
 import { identityBlock } from "./soul.js";
 import { memoryBlock, memoryStats, type MemoryStats } from "./memory.js";
 import { schedulerBlock } from "./scheduler.js";
-import { skillsBlock } from "./tools.js";
+import { skillsBlock } from "./tools/index.js";
 import { loadSkill } from "./skills.js";
 import { workspaceSnapshot } from "./workspace.js";
 

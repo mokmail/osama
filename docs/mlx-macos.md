@@ -129,6 +129,27 @@ is never offered to them and an MLX model is never offered to `llama-quantize`.
 Capability gating belongs to the *model kind*, not to the tool list: the sixteen
 llama.cpp tools stay visible and valid regardless of what is being served.
 
+*Shipped* (all but `lora`): `convert`, `dynamic_quant`, `fuse`, `evaluate`,
+`perplexity`, `generate`, `upload` — seven tabs on the MLX page, generated from the
+same `ToolSpec` every llama.cpp tool uses. Three things this stage turned out to need:
+
+- **Two new argument shapes**, both because argparse's are not `flag value`:
+  `joinSpace` for `nargs="+"` (`--tasks mmlu gsm8k` — comma-joining it is one task
+  named "mmlu,gsm8k", repeating it keeps only the last), and `enumArgv` for a
+  `BooleanOptionalAction` (`--apply-chat-template` / `--no-…`) and for a flag that
+  takes a value like `--verbose True` (a bare `--verbose` would eat the next argument).
+- **Extras, probed and installable.** `mlx_lm.evaluate` imports `lm_eval` at module
+  level and perplexity's loader imports `datasets`; both are mlx-lm extras, so a fresh
+  environment has two forms that cannot run. `probeMlxExtras` asks the venv's own
+  interpreter (cached), the spec declares `extras`, and both the form and
+  `POST /api/run` refuse — then `POST /api/mlx/extras` installs
+  `mlx-lm[evaluate,train]` into the environment Osama already owns.
+- **A required field is enforced on both sides.** An empty `--model` is not a fast
+  failure for `mlx_lm.generate`: it downloads mlx-lm's default 3B model first.
+
+`mlx_lm.lora` is deliberately left out: a training run is hours long and needs a stop
+control, which the one-shot runner does not have.
+
 ## 5. Non-goals
 
 - No GGUF↔MLX conversion. mlx-lm writes GGUF only as an export target and cannot

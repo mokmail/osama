@@ -33,7 +33,37 @@ export const mlxRoutes: RouteModule = (deps) => [
       runtime,
       paths: core.mlxPaths(),
       models: core.listMlxModels().length,
+      /**
+       * mlx-lm's evaluation extras (lm-eval, datasets). Carried here rather than on a
+       * route of its own: the Tools page already asks this question on mount, and the
+       * answer decides whether two of its tabs can run at all.
+       */
+      extras: runtime.ready ? await core.probeMlxExtras() : { checked: false, evaluate: false, datasets: false, detail: runtime.detail },
     });
+  }),
+
+  /**
+   * Add mlx-lm's evaluation extras to the environment.
+   *
+   * Only the MLX runtime's own venv is touched, and uv resolves against the mlx-lm
+   * already installed rather than replacing it. Backgrounded like the runtime
+   * install, for the same reason: it takes a minute or two and streams its log.
+   */
+  route("POST", "/api/mlx/extras", async ({ req, res }) => {
+    const why = unsupported();
+    if (why) return fail(res, 409, new Error(why));
+    const runtime = await core.detectRuntime();
+    if (!runtime.ready) return fail(res, 409, new Error(runtime.detail));
+    const body = await readBody(req);
+    // Which extras: what the tool asking for them needs. Default both.
+    const asked: unknown[] = Array.isArray(body.extras) ? body.extras : ["evaluate", "datasets"];
+    const needs = asked.map(String).filter((n): n is "evaluate" | "datasets" => n === "evaluate" || n === "datasets");
+    if (!needs.length) return fail(res, 400, new Error("extras must name 'evaluate' or 'datasets'"));
+    core
+      .installMlxExtras(needs, (e) => deps.broadcast("mlx", e))
+      .then((extras) => deps.broadcast("mlx", { stage: "extras", extras }))
+      .catch((err) => deps.broadcast("mlx", { stage: "error", error: String(err?.message ?? err) }));
+    json(res, 202, { started: true, extras: needs });
   }),
 
   /**

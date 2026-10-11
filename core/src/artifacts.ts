@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { listSessions, readSession } from "./sessions.js";
-import { jail, readRoots } from "./tools.js";
+import { jail, readRoots } from "./tools/index.js";
 import { logger } from "./logger.js";
 
 /**

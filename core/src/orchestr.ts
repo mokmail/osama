@@ -46,7 +46,7 @@ export interface DelegateOptions {
   system?: string;
   meter?: import("./context.js").Meter;
   sessionId?: string;
-  web?: import("./tools.js").WebAccess;
+  web?: import("./tools/index.js").WebAccess;
   maxSteps?: number;
   signal?: AbortSignal;
 }

@@ -56,6 +56,21 @@ export interface ParamSpec {
    */
   joinCommas?: boolean;
   /**
+   * With `repeat`, emit ONE flag followed by the entries as separate argv
+   * words (`--tasks mmlu gsm8k`). This is the shape argparse spells
+   * `nargs="+"`: comma-joining it would be read as one item, and repeating
+   * the flag would overwrite the earlier values (the default `store` action).
+   */
+  joinSpace?: boolean;
+  /**
+   * For an enum picker whose options are not `flag value` but whole argv
+   * fragments: a `BooleanOptionalAction` (`--apply-chat-template` or
+   * `--no-apply-chat-template`) or a value-taking bool (`--verbose True`).
+   * An option with no entry falls back to `flag value`; an empty array emits
+   * nothing, which leaves the tool's own default in place.
+   */
+  enumArgv?: Record<string, string[]>;
+  /**
    * The tool cannot run without it. The UI marks it and refuses to launch a
    * command that would fail on a missing positional (e.g. llama-quantize with
    * no input prints only the quant type).
@@ -93,6 +108,15 @@ export interface ToolSpec {
    * catalogue, two engines, and the flag checker still has one source of truth.
    */
   engine?: "llamacpp" | "mlx";
+  /**
+   * Packages this tool needs beyond mlx-lm's base install — the runtime's own
+   * extras. Two of the Evaluate tools import these BEFORE they read an argument,
+   * so without them the command dies on an import traceback rather than on
+   * anything the user typed. `mlx_lm.evaluate` needs `lm-eval`,
+   * `mlx_lm.perplexity` needs `datasets` (its data loader); both come from
+   * `mlx-lm[evaluate,train]`, which the UI offers to install.
+   */
+  extras?: Array<"evaluate" | "datasets">;
   params: ParamSpec[];
 }
 
@@ -115,7 +139,12 @@ export type ToolId =
   | "rpc"
   /** MLX tools: a different engine, a different runtime, the same form contract. */
   | "mlx-convert"
-  | "mlx-dynamic-quant";
+  | "mlx-dynamic-quant"
+  | "mlx-fuse"
+  | "mlx-evaluate"
+  | "mlx-perplexity"
+  | "mlx-generate"
+  | "mlx-upload";
 
 // ---------------------------------------------------------------------------
 // Shared parameter groups

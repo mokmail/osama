@@ -497,6 +497,12 @@ export const TOOLS: Record<ToolId, ToolSpec> = {
         help: "Reads a quantised model and writes it back to full precision.",
       },
       {
+        key: "uploadRepo", flag: "--upload-repo", type: "string",
+        label: "Upload to a Hub repo", group: "Distribute", order: 1, advanced: true,
+        help: "user/name — pushes the converted model to the Hugging Face Hub as soon as it is written. The repo is created if it does not exist. Needs a write token in HF_TOKEN.",
+        example: "your-name/Qwen2.5-0.5B-Instruct-4bit",
+      },
+      {
         key: "trustRemoteCode", flag: "--trust-remote-code", type: "bool",
         label: "Trust remote code", group: "Advanced", order: 1, advanced: true,
         help: "For repos whose tokenizer loader needs custom Python. It runs that code.",
@@ -565,6 +571,395 @@ export const TOOLS: Record<ToolId, ToolSpec> = {
       { key: "trustRemoteCode", flag: "--trust-remote-code", type: "bool", label: "Trust remote code", group: "Advanced", order: 5, advanced: true },
     ],
   },
+
+  /**
+   * Fuse: the second half of training.
+   *
+   * `mlx_lm.lora` writes an adapter beside the base model; this folds that adapter
+   * into the base weights and saves a model that stands on its own — which is what
+   * you actually serve. The one conversion mlx-lm offers TOWARD llama.cpp lives here
+   * too (`--export-gguf`), because a fused model is the only thing it can write out.
+   */
+  "mlx-fuse": {
+    id: "mlx-fuse",
+    binary: "mlx_lm.fuse",
+    engine: "mlx",
+    title: "Fuse adapter (MLX)",
+    summary: "Fold a trained LoRA adapter into its base MLX model and save the result as a standalone model.",
+    group: "mlx",
+    mode: "oneshot",
+    notes: [
+      "The input is the BASE model the adapter was trained against — an MLX folder, or a Hugging Face repo — together with the adapter directory training wrote (mlx-lm's default is `adapters`).",
+      "The output is a complete MLX model: the base weights with the adapter already merged, so it needs no adapter path when you serve it.",
+      "Training itself is not in this app yet, so a fuse needs an adapter produced elsewhere (`mlx_lm.lora` on the command line). An adapter that does not match the base model fails at load, not at fuse.",
+      "`--export-gguf` is the only direction mlx-lm can write toward llama.cpp, and only for llama, mistral and mixtral architectures. It still cannot READ a GGUF.",
+    ],
+    params: [
+      {
+        key: "model", flag: "--model", type: "model",
+        label: "Base MLX model", group: "Input", order: 1, required: true,
+        help: "The model the adapter was trained on: a directory with config.json and .safetensors, or a Hugging Face repo id.",
+        example: path.join(paths().models, "Qwen2.5-7B-Instruct-4bit"),
+      },
+      {
+        key: "adapterPath", flag: "--adapter-path", type: "path",
+        label: "Adapter folder", group: "Input", order: 2, required: true,
+        help: "Where training saved adapters.safetensors and adapter_config.json.",
+        example: path.join(paths().models, "adapters"),
+      },
+      {
+        key: "savePath", flag: "--save-path", type: "string",
+        label: "Save fused model to", group: "Input", order: 3,
+        help: "A new folder. Left empty, mlx-lm writes `fused_model` beside your other models.",
+        example: path.join(paths().models, "Qwen2.5-7B-Instruct-fused"),
+      },
+      {
+        key: "dequantize", flag: "--dequantize", type: "bool",
+        label: "Write full precision", group: "Output", order: 1,
+        help: "Merge into unquantised weights. The result is several times larger and is no longer a 4-bit model.",
+      },
+      {
+        key: "exportGguf", flag: "--export-gguf", type: "bool",
+        label: "Also export a GGUF", group: "Output", order: 2,
+        help: "Writes the fused weights as GGUF-F16 for llama.cpp. llama, mistral and mixtral only.",
+      },
+      {
+        key: "ggufPath", flag: "--gguf-path", type: "string",
+        label: "GGUF filename", group: "Output", order: 3, requires: ["exportGguf"],
+        help: "Relative to the folder above — not a directory of its own.",
+        example: "ggml-model-f16.gguf",
+      },
+      {
+        key: "uploadRepo", flag: "--upload-repo", type: "string",
+        label: "Upload to a Hub repo", group: "Distribute", order: 1, advanced: true,
+        help: "user/name — pushes the fused model to the Hugging Face Hub. Needs a write token in HF_TOKEN.",
+        example: "your-name/my-lora-model-fused",
+      },
+      {
+        key: "trustRemoteCode", flag: "--trust-remote-code", type: "bool",
+        label: "Trust remote code", group: "Advanced", order: 1, advanced: true,
+      },
+    ],
+  },
+
+  /**
+   * Evaluate — the MLX half of the Evaluate page.
+   *
+   * lm-evaluation-harness scores a model on named tasks, and mlx-lm implements the LM
+   * adapter for it. The harness is an extra (`mlx-lm[evaluate]`), so this spec carries
+   * `extras` and the UI will not run it before that is installed: the import happens
+   * before a single argument is read, so the failure would otherwise be a traceback
+   * about `lm_eval` and nothing about what the user did.
+   */
+  "mlx-evaluate": {
+    id: "mlx-evaluate",
+    binary: "mlx_lm.evaluate",
+    engine: "mlx",
+    title: "Evaluate (MLX)",
+    summary: "Score an MLX model on lm-evaluation-harness tasks and write the results as JSON.",
+    group: "mlx",
+    mode: "oneshot",
+    extras: ["evaluate"],
+    notes: [
+      "This runs lm-evaluation-harness inside Osama's MLX environment. The harness is not part of mlx-lm's base install: if it is missing here, this form says so and adds it to that environment on request.",
+      "Tasks are named by the harness: mmlu, gsm8k, hellaswag, arc_easy, wikitext… Give one or several.",
+      "A full task is hundreds to thousands of examples. Limit is how you keep it to minutes: it scores that many examples per task instead of all of them — and the number it prints is only comparable against another run with the same limit.",
+      "Batch size is the usual reason a run dies with an out-of-memory error; 8 is the tool's own default.",
+      "Results are written as JSON into the output directory, so two runs can be compared without re-running anything.",
+    ],
+    params: [
+      {
+        key: "model", flag: "--model", type: "model",
+        label: "Model to evaluate", group: "Input", order: 1, required: true,
+        help: "An MLX folder, a Hugging Face repo id, or a transformers checkpoint.",
+        example: path.join(paths().models, "Qwen2.5-7B-Instruct-4bit"),
+      },
+      {
+        key: "tasks", flag: "--tasks", type: "string",
+        label: "Tasks", group: "Input", order: 2, required: true, repeat: true, joinSpace: true,
+        help: "One per line. Harness task names, e.g. gsm8k, mmlu, arc_easy.",
+        example: "gsm8k",
+      },
+      {
+        key: "outputDir", flag: "--output-dir", type: "string",
+        label: "Output directory", group: "Input", order: 3,
+        help: "Where the result JSON lands. Left empty it is your models folder.",
+        example: path.join(paths().models, "eval-results"),
+      },
+      {
+        key: "limit", flag: "--limit", type: "number",
+        label: "Examples per task", group: "Measurement", order: 1,
+        help: "The whole way to make this finish. Left empty, every task runs in full.",
+        example: "100",
+      },
+      {
+        key: "batchSize", flag: "--batch-size", type: "number",
+        label: "Batch size", group: "Measurement", order: 2, default: 8,
+        help: "Sequences scored at once. Lower it when memory runs out.",
+      },
+      {
+        key: "numShots", flag: "--num-shots", type: "number",
+        label: "Few-shot examples", group: "Measurement", order: 3, advanced: true,
+        help: "Left empty, the task's own default is used.",
+      },
+      {
+        key: "maxTokens", flag: "--max-tokens", type: "number",
+        label: "Max tokens", group: "Measurement", order: 4, advanced: true,
+        help: "Overrides each task's own generation limit.",
+      },
+      {
+        key: "seed", flag: "--seed", type: "number",
+        label: "Seed", group: "Measurement", order: 5, advanced: true, default: 123,
+      },
+      {
+        key: "applyChatTemplate", flag: "--apply-chat-template", aliases: ["--no-apply-chat-template"],
+        type: "enum", enum: ["on", "off"],
+        enumArgv: { on: ["--apply-chat-template"], off: ["--no-apply-chat-template"] },
+        enumHelp: {
+          on: "Wrap each prompt in the model's chat template — the default for a model that has one.",
+          off: "Score the raw prompt. What you want for a base model, or when the template is the thing under test.",
+        },
+        label: "Chat template", group: "Prompt", order: 1,
+        help: "Left empty, mlx-lm decides: on for a model that has a chat template, off for one that does not.",
+      },
+      {
+        key: "chatTemplateArgs", flag: "--chat-template-args", type: "string",
+        label: "Chat template arguments", group: "Prompt", order: 2, advanced: true,
+        help: "A JSON object passed to apply_chat_template.",
+        example: "{\"enable_thinking\": false}",
+      },
+      {
+        key: "fewshotAsMultiturn", flag: "--fewshot-as-multiturn", type: "bool",
+        label: "Few-shot as a conversation", group: "Prompt", order: 3, advanced: true,
+        help: "Give the examples as turns rather than as one user message.",
+      },
+      { key: "temp", flag: "--temp", type: "number", label: "Temperature", group: "Sampling", order: 1, advanced: true, default: 0 },
+      { key: "topP", flag: "--top-p", type: "number", label: "Top-P", group: "Sampling", order: 2, advanced: true, default: 1 },
+      { key: "topK", flag: "--top-k", type: "number", label: "Top-K", group: "Sampling", order: 3, advanced: true, default: 0 },
+      {
+        key: "confirmRunUnsafeCode", flag: "--confirm-run-unsafe-code", type: "bool",
+        label: "Allow tasks that execute code", group: "Advanced", order: 1, advanced: true,
+        help: "Some harness tasks run generated code to check it. This is the yes to that.",
+      },
+      { key: "trustRemoteCode", flag: "--trust-remote-code", type: "bool", label: "Trust remote code", group: "Advanced", order: 2, advanced: true },
+    ],
+  },
+
+  /**
+   * Perplexity — the other half of the Evaluate page, and the one number that
+   * compares two models (or two quantisations of one) without a task suite.
+   *
+   * It needs `datasets` for its data loader, which is why it carries `extras` too.
+   * That import happens inside the loader, i.e. after the model has been read, so
+   * without it a real run fails late and reads like a data problem.
+   */
+  "mlx-perplexity": {
+    id: "mlx-perplexity",
+    binary: "mlx_lm.perplexity",
+    engine: "mlx",
+    title: "Perplexity (MLX)",
+    summary: "Measure a model's perplexity on a dataset — the number that makes two models comparable.",
+    group: "mlx",
+    mode: "oneshot",
+    extras: ["datasets"],
+    notes: [
+      "Lower is better, and it only means anything between runs on the same data, the same sequence length and the same number of samples. Change any of those and the numbers stop being comparable — which is why each is a field here.",
+      "The data is a Hugging Face dataset in mlx-lm's own format; the tool's default is allenai/tulu-3-sft-mixture, which is a very large download — name a small one instead (NeelNanda/pile-10k is ten thousand rows). The loader comes from the same extras as Evaluate: if it is missing, the form says so and installs it on request.",
+      "The dataset must load without a config and carry a `text` column. One whose repository still holds a Python loading script is refused outright by current `datasets` versions (\"Dataset scripts are no longer supported\") — that is a fact about the dataset, not about this tool.",
+      "Samples × sequence length is the work: 256 × 512 tokens is the tool's default. Cutting either is how you make a comparison finish — but compare like with like.",
+    ],
+    params: [
+      {
+        key: "model", flag: "--model", type: "model",
+        label: "Model", group: "Input", order: 1, required: true,
+        help: "An MLX folder or a Hugging Face repo id.",
+        example: path.join(paths().models, "Qwen2.5-7B-Instruct-4bit"),
+      },
+      {
+        key: "dataPath", flag: "--data-path", type: "string",
+        label: "Dataset", group: "Input", order: 2,
+        help: "A Hugging Face dataset id in mlx-lm's format — one `text` field per row.",
+        example: "allenai/tulu-3-sft-mixture",
+      },
+      {
+        key: "sequenceLength", flag: "--sequence-length", type: "number",
+        label: "Sequence length", group: "Measurement", order: 1, default: 512, unit: "tokens",
+      },
+      {
+        key: "numSamples", flag: "--num-samples", type: "number",
+        label: "Samples", group: "Measurement", order: 2, default: 256,
+        help: "-1 uses every sample the dataset has — honest, and slow.",
+      },
+      {
+        key: "batchSize", flag: "--batch-size", type: "number",
+        label: "Batch size", group: "Measurement", order: 3, default: 8,
+        help: "Lower it when memory runs out.",
+      },
+      { key: "seed", flag: "--seed", type: "number", label: "Seed", group: "Measurement", order: 4, default: 123, advanced: true },
+      { key: "trustRemoteCode", flag: "--trust-remote-code", type: "bool", label: "Trust remote code", group: "Advanced", order: 1, advanced: true },
+    ],
+  },
+
+  /**
+   * Generate: one prompt, one answer, printed with its timings.
+   *
+   * This is the same engine the server runs, without the server — the cheapest way
+   * to see what a model, a quantisation or a fused adapter actually does.
+   */
+  "mlx-generate": {
+    id: "mlx-generate",
+    binary: "mlx_lm.generate",
+    engine: "mlx",
+    title: "Generate (MLX)",
+    summary: "Answer one prompt in the terminal and print the timings — a one-shot comparison against another model or quantisation.",
+    group: "mlx",
+    mode: "oneshot",
+    notes: [
+      "The same engine the MLX server runs, without the server: one prompt in, one answer out, plus the prompt-token count and the tokens per second that make two builds comparable.",
+      "The prompt is wrapped in the tokenizer's chat template unless you say otherwise — that is what makes an instruct model answer instead of continuing the text.",
+      "The model has no default here on purpose: mlx-lm's own default would download a 3B model you did not ask for.",
+      "Speculative decoding runs a small draft model ahead of the big one. Same output, faster when the draft guesses well and slower when it does not — and it needs a second model on disk.",
+    ],
+    params: [
+      {
+        key: "model", flag: "--model", type: "model",
+        label: "Model", group: "Model", order: 1, required: true,
+        help: "An MLX folder, a Hugging Face repo id, or a transformers checkpoint.",
+        example: path.join(paths().models, "Qwen2.5-0.5B-Instruct-4bit"),
+      },
+      {
+        key: "adapterPath", flag: "--adapter-path", type: "path",
+        label: "Adapter folder", group: "Model", order: 2, advanced: true,
+        help: "Generate with a LoRA adapter on top of the base model, without fusing it first.",
+      },
+      {
+        key: "prompt", flag: "--prompt", aliases: ["-p"], type: "string",
+        label: "Prompt", group: "Prompt", order: 1, required: true,
+        help: "`-` reads the prompt from stdin instead.",
+        example: "Explain a quantised model in one paragraph.",
+      },
+      { key: "systemPrompt", flag: "--system-prompt", type: "string", label: "System prompt", group: "Prompt", order: 2 },
+      {
+        key: "prefillResponse", flag: "--prefill-response", type: "string",
+        label: "Prefill the reply", group: "Prompt", order: 3, advanced: true,
+        help: "Start the assistant's turn with this text instead of generating it.",
+      },
+      {
+        key: "ignoreChatTemplate", flag: "--ignore-chat-template", type: "bool",
+        label: "Ignore the chat template", group: "Prompt", order: 4,
+        help: "Send the raw prompt. For a base model, or to watch raw continuation.",
+      },
+      {
+        key: "useDefaultChatTemplate", flag: "--use-default-chat-template", type: "bool",
+        label: "Use the default chat template", group: "Prompt", order: 5, advanced: true,
+      },
+      {
+        key: "chatTemplateConfig", flag: "--chat-template-config", type: "string",
+        label: "Chat template config", group: "Prompt", order: 6, advanced: true,
+        help: "A JSON object passed to apply_chat_template.",
+        example: "{\"enable_thinking\": false}",
+      },
+      { key: "maxTokens", flag: "--max-tokens", aliases: ["-m"], type: "number", label: "Max tokens", group: "Sampling", order: 1, unit: "tokens", default: 100 },
+      { key: "temp", flag: "--temp", type: "number", label: "Temperature", group: "Sampling", order: 2, default: 0 },
+      { key: "topP", flag: "--top-p", type: "number", label: "Top-P", group: "Sampling", order: 3, default: 1 },
+      { key: "minP", flag: "--min-p", type: "number", label: "Min-P", group: "Sampling", order: 4, default: 0 },
+      { key: "topK", flag: "--top-k", type: "number", label: "Top-K", group: "Sampling", order: 5, default: 0 },
+      {
+        key: "xtcProbability", flag: "--xtc-probability", type: "number",
+        label: "XTC probability", group: "Sampling", order: 6, advanced: true,
+        help: "How often to drop the most likely token, for a less predictable reply.",
+      },
+      { key: "xtcThreshold", flag: "--xtc-threshold", type: "number", label: "XTC threshold", group: "Sampling", order: 7, advanced: true },
+      { key: "minTokensToKeep", flag: "--min-tokens-to-keep", type: "number", label: "Min-P tokens kept", group: "Sampling", order: 8, advanced: true },
+      { key: "seed", flag: "--seed", type: "number", label: "Seed", group: "Sampling", order: 9, advanced: true },
+      {
+        key: "maxKvSize", flag: "--max-kv-size", type: "number",
+        label: "Cap the KV cache", group: "Memory", order: 1, advanced: true, unit: "tokens",
+        help: "The sliding window, for models that support one.",
+      },
+      {
+        key: "prefillStepSize", flag: "--prefill-step-size", type: "number",
+        label: "Prefill step", group: "Memory", order: 2, advanced: true, default: 2048, unit: "tokens",
+        help: "Prompt tokens processed at a time. Smaller lowers peak memory during prefill.",
+      },
+      {
+        key: "promptCacheFile", flag: "--prompt-cache-file", type: "path",
+        label: "Prompt cache file", group: "Memory", order: 3, advanced: true,
+        help: "Reuse a saved KV cache instead of recomputing the prompt.",
+      },
+      {
+        key: "quantizeActivations", flag: "-qa", aliases: ["--quantize-activations"], type: "bool",
+        label: "Quantise activations", group: "Memory", order: 4, advanced: true,
+        help: "Uses each layer's own quantisation config on its activations.",
+      },
+      {
+        key: "kvBits", flag: "--kv-bits", type: "number",
+        label: "KV cache bits", group: "Memory", order: 5, advanced: true,
+        help: "Quantise the KV cache. Left alone, it stays unquantised.",
+      },
+      { key: "kvGroupSize", flag: "--kv-group-size", type: "number", label: "KV group size", group: "Memory", order: 6, advanced: true, requires: ["kvBits"] },
+      { key: "quantizedKvStart", flag: "--quantized-kv-start", type: "number", label: "Quantise KV from step", group: "Memory", order: 7, advanced: true, requires: ["kvBits"] },
+      {
+        key: "draftModel", flag: "--draft-model", type: "model",
+        label: "Draft model", group: "Speculative", order: 1, advanced: true,
+        help: "A smaller model that proposes tokens for the main one to verify.",
+      },
+      { key: "numDraftTokens", flag: "--num-draft-tokens", type: "number", label: "Draft tokens", group: "Speculative", order: 2, advanced: true, default: 3, requires: ["draftModel"] },
+      {
+        key: "extraEosToken", flag: "--extra-eos-token", type: "string",
+        label: "Extra stop tokens", group: "Advanced", order: 1, advanced: true,
+        repeat: true, joinSpace: true,
+        help: "One per line. Tokens that also end generation.",
+      },
+      {
+        key: "verbose", flag: "--verbose", type: "enum", enum: ["on", "off"],
+        enumArgv: { on: ["--verbose", "True"], off: ["--verbose", "False"] },
+        enumHelp: {
+          on: "Print the prompt, the token count and the timings, then the answer — mlx-lm's default.",
+          off: "Print only the answer.",
+        },
+        label: "Print the run", group: "Advanced", order: 2,
+        help: "mlx-lm takes a value here (True/False) rather than acting as a switch, so this is a two-option picker rather than a tick.",
+      },
+      { key: "trustRemoteCode", flag: "--trust-remote-code", type: "bool", label: "Trust remote code", group: "Advanced", order: 3, advanced: true },
+    ],
+  },
+
+  /**
+   * Upload: what `--upload-repo` does at the end of a convert or a fuse, on its own.
+   *
+   * Worth its own entry because the interesting case is a model that is already on
+   * disk — a fused adapter, a hand-made quantisation, someone else's folder.
+   */
+  "mlx-upload": {
+    id: "mlx-upload",
+    binary: "mlx_lm.upload",
+    engine: "mlx",
+    title: "Upload to the Hub (MLX)",
+    summary: "Push an MLX model folder to the Hugging Face Hub, with a model card built from its README.",
+    group: "mlx",
+    mode: "oneshot",
+    notes: [
+      "Point it at a model folder and give it a repo name; the repo is created if it does not exist, and the folder's README.md becomes the model card.",
+      "It needs a Hugging Face token with WRITE access — in HF_TOKEN, or from an earlier `hf auth login`. Without one the upload fails at its first request, after the run has started.",
+      "This is the step Convert and Fuse take when you give them an Upload repo; it is separate here for a model that is already on disk.",
+      "A large model uploads in chunks and can be resumed by running it again. It is the slowest thing on this page.",
+    ],
+    params: [
+      {
+        key: "path", flag: "--path", type: "model",
+        label: "MLX model folder", group: "Input", order: 1, required: true,
+        help: "The model directory to upload: config.json and .safetensors, plus a README.md if you want a card.",
+        example: path.join(paths().models, "Qwen2.5-7B-Instruct-fused"),
+      },
+      {
+        key: "uploadRepo", flag: "--upload-repo", type: "string",
+        label: "Hub repo", group: "Distribute", order: 1, required: true,
+        help: "user/name of the repository to create or overwrite.",
+        example: "your-name/Qwen2.5-7B-Instruct-4bit",
+      },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -628,6 +1023,13 @@ export function buildArgv(toolId: ToolId, values: ParamValues): string[] {
 
   const emit = (p: ParamSpec): void => {
     const raw = values[p.key];
+    // A picker whose options are whole argv fragments rather than a value —
+    // a BooleanOptionalAction, or a flag that takes `True`/`False` (see enumArgv).
+    if (p.enumArgv) {
+      const frag = p.enumArgv[String(raw)];
+      if (frag) argv.push(...frag);
+      return;
+    }
     if (p.type === "bool") {
       argv.push(p.flag);
       return;
@@ -635,9 +1037,11 @@ export function buildArgv(toolId: ToolId, values: ParamValues): string[] {
     if (p.repeat) {
       const parts = splitEntries(raw as string);
       // Repeatable flags are comma-joined where the tool documents a list
-      // (`--lora a,b`), and repeated where it documents repetition
+      // (`--lora a,b`), space-separated where it documents `nargs="+"`
+      // (`--tasks mmlu gsm8k`), and repeated where each occurrence counts
       // (`--override-kv k=v` may be given many times).
       if (p.joinCommas) argv.push(p.flag, parts.join(","));
+      else if (p.joinSpace) argv.push(p.flag, ...parts);
       else for (const entry of parts) argv.push(p.flag, entry);
       return;
     }
@@ -656,6 +1060,20 @@ export function renderCommand(binary: string, argv: string[]): string {
   return [binary, ...argv]
     .map((a) => (/[\s"'$`\\]/.test(a) ? `'${a.replace(/'/g, `'\\''`)}'` : a))
     .join(" ");
+}
+
+/**
+ * The `required` fields a run is missing.
+ *
+ * A tool does not run without them, so both sides refuse: the form disables Run, and
+ * the server answers 400. Enforcing it here and not only in the UI matters because a
+ * missing required value is not always a fast failure — `mlx_lm.generate` with no
+ * `--model` happily starts downloading mlx-lm's own default 3B model first.
+ */
+export function missingRequired(toolId: ToolId, values: ParamValues): string[] {
+  const spec = TOOLS[toolId];
+  if (!spec) return [];
+  return spec.params.filter((p) => p.required && !isTruthy(values[p.key])).map((p) => p.label);
 }
 
 export function toolSpec(id: ToolId): ToolSpec {

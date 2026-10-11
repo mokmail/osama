@@ -79,6 +79,12 @@ export interface ChatState {
 /** What a run needs to start. Everything else is read from the store. */
 export interface RunRequest {
   runId: string;
+  /**
+   * How this turn asks for tool calls (agent mode only): the engine's own format, the
+   * guided JSON envelope, or none at all. The server decides how strongly it can be
+   * enforced — llama.cpp via json_schema, mlx-lm by asking.
+   */
+  toolMode?: "auto" | "guided" | "off";
   baseUrl: string;
   apiKey?: string;
   agentic: boolean;
@@ -398,6 +404,7 @@ async function consume(req: RunRequest, ac: AbortController): Promise<void> {
       personality: req.personality,
       messages: payloadMessages as AgentMessagePayload[],
       approval: req.approval,
+      toolMode: req.toolMode,
       activeSkills: req.activeSkills,
       temperature: req.temperature,
       top_p: req.top_p,

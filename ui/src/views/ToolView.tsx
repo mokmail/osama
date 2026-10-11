@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { CheckCircle2, FolderOpen, Lightbulb, PackagePlus, Play, RefreshCw, Settings2, Terminal, Wrench, XCircle, Zap } from "lucide-react";
 import { api, mlxApi } from "../lib/api";
-import type { LocalModel, ManagedProcess, ParamSpec, ToolSpec } from "../lib/types";
+import type { LocalModel, ManagedProcess, MlxExtras, MlxModel, ParamSpec, ToolSpec } from "../lib/types";
 import { Badge, Button, Card, CardHead, Console, Empty, Field, Spinner, useToast } from "../components/ui";
 import { GgufPicker } from "../components/GgufPicker";
 import { bytes, fileBase, shortPath, timeAgo } from "../lib/format";
@@ -20,11 +20,24 @@ export function ToolView({ group, bus }: { group: string; bus: EventBus }) {
    * still worth explaining rather than showing.
    */
   const [mlxReason, setMlxReason] = useState<string | null>(null);
+  /**
+   * mlx-lm's evaluation extras, from the same status call. `mlx_lm.evaluate` imports
+   * lm-evaluation-harness and perplexity's loader imports `datasets` — neither is in
+   * mlx-lm's base install, and without them those two forms produce a guaranteed
+   * import traceback. Fetched once here and handed to the tool.
+   */
+  const [mlxExtras, setMlxExtras] = useState<MlxExtras | null>(null);
+  const reloadExtras = useCallback(() => {
+    mlxApi.status().then((s) => setMlxExtras(s.extras)).catch(() => {});
+  }, []);
   useEffect(() => {
     if (!tools.some((t) => t.engine === "mlx")) return;
     mlxApi
       .status()
-      .then((s) => setMlxReason(s.support.supported ? null : (s.support.reason ?? "MLX is not supported on this machine.")))
+      .then((s) => {
+        setMlxReason(s.support.supported ? null : (s.support.reason ?? "MLX is not supported on this machine."));
+        setMlxExtras(s.extras);
+      })
       .catch(() => {});
   }, [tools]);
 
@@ -50,7 +63,7 @@ export function ToolView({ group, bus }: { group: string; bus: EventBus }) {
       {active && active.engine === "mlx" && mlxReason ? (
         <Empty title="MLX is not available on this machine" sub={mlxReason} />
       ) : active ? (
-        <ToolRunner spec={active} bus={bus} />
+        <ToolRunner spec={active} bus={bus} extras={mlxExtras} onExtrasChanged={reloadExtras} />
       ) : (
         <Empty title="No tools in this group" />
       )}
@@ -142,6 +155,9 @@ function failureHint(lines: string[], code: number | null, engine: "llamacpp" | 
     if (/Repository Not Found|gated|401|403/i.test(text)) {
       return "The model could not be fetched. Check the repo id — it must be a Hugging Face transformers model (or an MLX folder on disk) — and set HF_TOKEN for a gated repo.";
     }
+    if (/No module named '(lm_eval|datasets)'/.test(text)) {
+      return "This tool needs mlx-lm's evaluation extras, which are not in Osama's MLX environment yet — press “Install extras” above the Run button and they are added to it.";
+    }
     if (/No module named|not installed/i.test(text)) {
       return "The MLX environment is missing something this tool needs — build or update it from the Models page.";
     }
@@ -171,7 +187,13 @@ function failureHint(lines: string[], code: number | null, engine: "llamacpp" | 
   return null;
 }
 
-export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
+export function ToolRunner({ spec, bus, extras, onExtrasChanged }: {
+  spec: ToolSpec;
+  bus: EventBus;
+  /** mlx-lm's evaluation extras, or null while the answer is unknown */
+  extras?: MlxExtras | null;
+  onExtrasChanged?: () => void;
+}) {
   const toast = useToast();
   const [models, setModels] = useState<LocalModel[]>([]);
   const [values, setValues] = useState<Values>({});
@@ -190,6 +212,64 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
    * "the new run already finished, with the old numbers".
    */
   const [since, setSince] = useState(0);
+  /** An extras install this page started, so the button can say what is happening. */
+  const [installingExtras, setInstallingExtras] = useState(false);
+
+  /**
+   * What this tool needs beyond mlx-lm's base install and does not have.
+   *
+   * Only ever non-empty when the answer is KNOWN (`extras.checked`): a probe that
+   * could not run is not evidence that a package is missing, and blocking a run on it
+   * would be the same guess as assuming it is present.
+   */
+  const missingExtras = useMemo(() => {
+    if (!spec.extras?.length || !extras?.checked) return [];
+    return spec.extras.filter((n) => (n === "evaluate" ? !extras.evaluate : !extras.datasets));
+  }, [spec.extras, extras]);
+
+  /** The install is backgrounded server-side; watch the status until it lands. */
+  useEffect(() => {
+    if (!installingExtras) return;
+    let alive = true;
+    let tries = 0;
+    const id = setInterval(async () => {
+      tries += 1;
+      const s = await mlxApi.status().catch(() => null);
+      if (!alive) return;
+      const done = Boolean(s?.extras.checked && s.extras.evaluate && s.extras.datasets);
+      if (done) {
+        clearInterval(id);
+        setInstallingExtras(false);
+        onExtrasChanged?.();
+        toast.push("ok", "mlx-lm's evaluation extras are installed — this tool can run now.");
+      } else if (tries >= 75) {
+        // Five minutes: long enough for uv to resolve and download. Say so rather
+        // than leaving a button that claims to be installing forever.
+        clearInterval(id);
+        setInstallingExtras(false);
+        onExtrasChanged?.();
+        toast.push("info", "The extras install is still running — the MLX log on the Models page has its output.");
+      }
+    }, 4000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [installingExtras, onExtrasChanged, toast]);
+
+  async function installExtras() {
+    setInstallingExtras(true);
+    try {
+      await mlxApi.extras(missingExtras);
+      toast.push(
+        "info",
+        `Installing ${missingExtras.map((n) => (n === "evaluate" ? "lm-eval" : "datasets")).join(" and ")} into Osama's MLX environment…`,
+      );
+    } catch (e) {
+      setInstallingExtras(false);
+      toast.push("err", (e as Error).message);
+    }
+  }
 
   useEffect(() => {
     api.models().then((r) => setModels(r.models)).catch(() => {});
@@ -266,15 +346,29 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
     if (run.finished) setStarting(false);
   }, [run.finished]);
 
-  /** The output path: what the user typed, else the second positional argument. */
+  /**
+   * Does this tool write anything? Only those get an output path and a size on disk:
+   * an evaluate, a generate or an upload has no output to describe, and inventing one
+   * from an arbitrary argv slot is how a run gets reported as writing its own input.
+   */
+  const writesOutput = useMemo(
+    () => spec.params.some((p) => p.key === "output" || p.key === "mlxPath" || p.key === "savePath"),
+    [spec.params],
+  );
+
+  /**
+   * The output path: what the user typed, else the second positional argument.
+   */
   const outputPath = useMemo(() => {
-    // LLama.cpp tools have an explicit output argument; an MLX tool is told where to
-    // write with --mlx-path, which is a directory rather than a file.
-    const typed = String(values.output ?? values.mlxPath ?? "").trim();
+    // An MLX tool is told where to write with a flag of its own — --mlx-path for a
+    // conversion, --save-path for a fuse; the tools that write nothing have neither.
+    if (spec.engine === "mlx") return writesOutput ? String(values.mlxPath ?? values.savePath ?? "").trim() : "";
+    // llama.cpp tools name it as the second positional: `llama-quantize [opts] IN OUT`.
+    const typed = String(values.output ?? "").trim();
     if (typed) return typed;
     const argv = run.command ? run.command.split(" ") : [];
     return argv.length >= 3 && argv[1] === "-m" ? "" : (argv[2] ?? "");
-  }, [values.output, run.command]);
+  }, [spec.engine, writesOutput, values.output, values.mlxPath, values.savePath, run.command]);
 
   /**
    * The size on disk, from the real directory listing — the parsed "quant size"
@@ -391,6 +485,7 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
                   <ParamInput
                     key={p.key}
                     spec={p}
+                    engine={spec.engine}
                     value={values[p.key]}
                     models={models}
                     onLibraryChanged={reloadModels}
@@ -426,9 +521,28 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
             Still needed before this can run: {missingRequired.map((p) => p.label).join(", ")}.
           </div>
         )}
+        {missingExtras.length > 0 && (
+          <div style={{ marginTop: 8 }}>
+            <div className="help" style={{ color: "var(--warn)" }}>
+              This tool imports {missingExtras.map((n) => (n === "evaluate" ? "lm-evaluation-harness" : "`datasets`")).join(" and ")}{" "}
+              before it reads a single argument, and mlx-lm does not install it by default. Run it as it is and it fails on that
+              import, whatever you put in the form.
+            </div>
+            <div style={{ marginTop: 6 }}>
+              <Button size="sm" variant="ghost" onClick={installExtras} disabled={installingExtras}>
+                {installingExtras ? <Spinner /> : <PackagePlus size={13} />}
+                {installingExtras ? "Installing — this can take a minute" : "Install extras"}
+              </Button>
+            </div>
+          </div>
+        )}
 
         <div className="row wrap" style={{ marginTop: 14, gap: 10, alignItems: "center" }}>
-          <Button variant="primary" onClick={start} disabled={running || starting || missingRequired.length > 0}>
+          <Button
+            variant="primary"
+            onClick={start}
+            disabled={running || starting || missingRequired.length > 0 || missingExtras.length > 0 || installingExtras}
+          >
             {running ? <Spinner /> : isLongRunning ? <Play size={15} /> : <Zap size={15} />}
             {running ? "Running…" : `${isLongRunning ? "Start" : "Run"} ${spec.binary}`}
           </Button>
@@ -497,7 +611,15 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
         <Card className="card-pad">
           <CardHead
             title="Result"
-            sub={run.error ? "the run stopped before it finished" : failed ? "finished with an error" : "the conversion finished"}
+            sub={
+              run.error
+                ? "the run stopped before it finished"
+                : failed
+                  ? "finished with an error"
+                  : writesOutput
+                    ? "the output is ready"
+                    : "the run finished"
+            }
             right={
               <div className="row" style={{ gap: 8 }}>
                 <Badge kind={failed ? "danger" : "ok"}>{failed ? <XCircle size={11} /> : <CheckCircle2 size={11} />} {code === null ? "error" : `exit ${code}`}</Badge>
@@ -513,11 +635,15 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
           )}
 
           <dl className="kv">
-            <dt>Output</dt>
-            <dd className="mono small" title={outputPath || undefined}>
-              {outputPath ? shortPath(outputPath, 64) : <span className="faint">beside the input</span>}
-              {outBytes !== null && <span className="faint"> · {bytes(outBytes)} on disk</span>}
-            </dd>
+            {writesOutput && (
+              <>
+                <dt>Output</dt>
+                <dd className="mono small" title={outputPath || undefined}>
+                  {outputPath ? shortPath(outputPath, 64) : <span className="faint">beside the input</span>}
+                  {outBytes !== null && <span className="faint"> · {bytes(outBytes)} on disk</span>}
+                </dd>
+              </>
+            )}
             {summary.inputSize && <dt>From</dt>}
             {summary.inputSize && <dd>{summary.inputSize} <span className="faint">{summary.inputBpw} BPW</span></dd>}
             {summary.outputSize && <dt>To</dt>}
@@ -599,9 +725,11 @@ function orderedGroups(params: ParamSpec[]): string[] {
 }
 
 function ParamInput({
-  spec, value, models, onChange, onLibraryChanged,
+  spec, engine, value, models, onChange, onLibraryChanged,
 }: {
   spec: ParamSpec;
+  /** the engine of the tool this field belongs to: MLX models are directories */
+  engine?: "llamacpp" | "mlx";
   value: string | number | boolean | undefined;
   models: LocalModel[];
   onChange: (v: string | number | boolean) => void;
@@ -610,6 +738,16 @@ function ParamInput({
 }) {
   const toast = useToast();
   const [picker, setPicker] = useState(false);
+  /**
+   * MLX models, for an MLX tool's model field. A model there is a DIRECTORY, so the
+   * llama.cpp picker — the GGUF library plus a .gguf disk browser — would offer the
+   * wrong thing entirely.
+   */
+  const [mlxModels, setMlxModels] = useState<MlxModel[]>([]);
+  useEffect(() => {
+    if (engine !== "mlx" || spec.type !== "model") return;
+    mlxApi.models().then((r) => setMlxModels(r.models)).catch(() => {});
+  }, [engine, spec.type]);
   const label = `${spec.label}${spec.unit ? ` · ${spec.unit}` : ""}`;
   /** A sample value first: a concrete example teaches more than a description. */
   const placeholder = spec.example ?? "—";
@@ -654,6 +792,41 @@ function ParamInput({
           onChange={(e) => onChange(e.target.value === "" ? "" : Number(e.target.value))}
           placeholder={placeholder}
         />
+      </Field>
+    );
+  }
+
+  /**
+   * An MLX tool's model field: a directory in the MLX catalogue, or a Hugging Face
+   * repo id. The path stays the value — the list is a shortcut into it, and typing an
+   * id the app has never seen is still allowed.
+   */
+  if (spec.type === "model" && engine === "mlx") {
+    const chosen = String(value ?? "");
+    const known = mlxModels.some((m) => m.dir === chosen);
+    return (
+      <Field label={label} help={spec.help} required={spec.required}>
+        <input
+          className="input"
+          value={chosen}
+          spellCheck={false}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={spec.example ?? "/path/to/an/mlx-model"}
+        />
+        <select className="select" value={known ? chosen : ""} onChange={(e) => e.target.value && onChange(e.target.value)}>
+          <option value="">— {mlxModels.length > 0 ? "pick an MLX model" : "no MLX models yet"} —</option>
+          {mlxModels.map((m) => (
+            <option key={m.dir} value={m.dir}>
+              {m.name} · {m.quantization?.bits ? `${m.quantization.bits}-bit` : "unquantised"} · {bytes(m.sizeBytes)}
+            </option>
+          ))}
+        </select>
+        {chosen && (
+          <span className="mono small faint" title={chosen}>
+            {shortPath(chosen, 72)}
+            {known ? " · in your MLX models" : " · external"}
+          </span>
+        )}
       </Field>
     );
   }

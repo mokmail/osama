@@ -114,7 +114,14 @@ function Shell() {
    */
   const [mlxSupported, setMlxSupported] = useState(false);
   useEffect(() => {
-    mlxApi.status().then((s) => setMlxSupported(s.support.supported)).catch(() => {});
+    // Both halves are needed: the platform must be able to run MLX, *and* the engine
+    // this page is talking to must actually carry the tools. The UI is served from disk
+    // and the engine is a process, so after an update the two can disagree — and a nav
+    // entry pointing at a group the running catalogue does not have is a dead page
+    // ("no tools in this group") for no reason the user can act on.
+    Promise.all([mlxApi.status(), api.tools()])
+      .then(([status, tools]) => setMlxSupported(status.support.supported && tools.tools.some((t) => t.engine === "mlx")))
+      .catch(() => {});
   }, []);
   /**
    * The desktop rail: the sidebar collapses to icons and the choice survives a

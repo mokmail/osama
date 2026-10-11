@@ -82,9 +82,17 @@ export interface ToolSpec {
    * which ones actually matter, and what the output is. Rendered above the form.
    */
   notes?: string[];
-  group: "run" | "serve" | "create" | "evaluate" | "inspect" | "distribute" | "edit";
+  group: "run" | "serve" | "create" | "evaluate" | "inspect" | "distribute" | "edit" | "mlx";
   /** long-running process (start/stop) vs one-shot (run to completion) */
   mode: "process" | "oneshot";
+  /**
+   * Which engine runs this tool. Defaults to llama.cpp: `binary` is then resolved
+   * against the installed engine build. For "mlx" it is a console script from
+   * Osama's own mlx-lm environment, run with that environment's Python and its four
+   * launcher variables unset — see `mlxToolPath`/`mlxProcessEnv` in mlx.ts. One
+   * catalogue, two engines, and the flag checker still has one source of truth.
+   */
+  engine?: "llamacpp" | "mlx";
   params: ParamSpec[];
 }
 
@@ -104,7 +112,10 @@ export type ToolId =
   | "fit-params"
   | "tts"
   | "lora"
-  | "rpc";
+  | "rpc"
+  /** MLX tools: a different engine, a different runtime, the same form contract. */
+  | "mlx-convert"
+  | "mlx-dynamic-quant";
 
 // ---------------------------------------------------------------------------
 // Shared parameter groups

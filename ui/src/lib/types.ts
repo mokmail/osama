@@ -118,6 +118,8 @@ export interface ToolSpec {
   notes?: string[];
   group: string;
   mode: "process" | "oneshot";
+  /** which engine runs it: llama.cpp (default) or MLX, Apple silicon only */
+  engine?: "llamacpp" | "mlx";
   params: ParamSpec[];
 }
 

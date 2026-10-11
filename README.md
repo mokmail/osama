@@ -124,7 +124,8 @@ column is verifiable in this repo.
    downloads, split parts and sizes, and quantisations read from the file headers.
 4. **MLX, on Apple silicon** — one **Update** builds Apple's runtime in a private
    environment, then the MLX catalogue fetches a conversion; it appears beside your
-   GGUF models, fetched whole or not at all.
+   GGUF models, fetched whole or not at all. **MLX tools** goes the other way: convert
+   a Hugging Face model to MLX, quantise it on the way, or re-quantise one you have.
 5. **Server** — start a server on the model you picked, with every flag
    explained, then chat with it in **Chat** — switch the provider to MLX if that is
    what you are serving.
@@ -306,6 +307,7 @@ See [Headless CLI](#headless-cli) for the full command set.
 | | Merge LoRA | Fold a LoRA adapter into a base model and resave a standalone GGUF |
 | | Evaluate | `llama-bench`, `llama-batched-bench`, `llama-perplexity` |
 | | Inspect | `llama-tokenize`, `llama-fit-params` |
+| | MLX tools | **Convert (MLX)** — a Hugging Face model into an MLX one, quantised in the same pass if you want — and **Dynamic quantisation**, per-layer bits for a target bits-per-weight. Apple silicon only: the entry is absent everywhere else |
 | **System** | llama.cpp | Engine builds: releases, install, activate, remove |
 | | MCP | Model Context Protocol servers — presets, connect, and the tools they expose |
 
@@ -481,10 +483,38 @@ folder you merely pointed at is never touched), and not currently served. If it 
 being served — or is stuck loading — the refusal carries the way out: stop the server
 and delete, from the same dialog.
 
+### Converting and quantising
+
+The **MLX tools** page holds the two things that *make* an MLX model rather than fetch
+one, run through the same contract as the llama.cpp tools: a command you can read
+before it runs, a live log, and a result card reporting the numbers the tool printed
+itself.
+
+- **Convert (MLX)** — `mlx_lm.convert`: a Hugging Face model in, an MLX directory out.
+  Quantisation is not a second pass here: tick **Quantize** and that same pass writes
+  quantised weights, at the bit width, group size and mode you choose. **Mixed
+  precision** applies a per-layer recipe instead of one width everywhere — the lever
+  for a model that will not otherwise fit, at the cost of measuring sensitivities
+  first.
+- **Dynamic quantisation** — `mlx_lm.dynamic_quant`: an MLX model in, a smaller one
+  out, at a target bits per weight. It measures how much each layer cares and spends
+  the bits where they are noticed (a real run reported `3.993 bits per weight`, 4.25 GB
+  peak). Its input must be **full precision**, because the measurement is gradients on
+  the weights: hand it an already quantised model and mlx fails with `[grad] Must
+  specify at least one argument`, which the app translates into that sentence instead
+  of a traceback.
+
+Both write a directory you can serve immediately — the library picks it up the moment
+it is complete. The result card shows the output folder with the size actually on disk,
+the tool's own summary (`Quantized model with 3.993 bits per weight.`, `Peak memory
+used: 4.250GB`), and the phase the tool is in while it runs ("Estimating
+sensitivities"), read from its tqdm bars rather than a generic spinner.
+
 ### What MLX does not give you
 
-- **Inference, not conversion.** `mlx_lm.convert` (per-layer mixed precision) is not
-  exposed yet: Osama fetches and serves MLX models, it does not make them.
+- **Quantising is converting.** There is no separate MLX quantiser: `convert -q` and
+  `dynamic_quant` are the two ways, and both are on the MLX tools page. There is also
+  no GGUF → MLX path yet, because the `--gguf-path` flag landed after mlx-lm 0.32.
 - **Text models only.** `mlx-lm` serves text generation; speech and vision
   conversions belong to `mlx-audio` and `mlx-vlm`, and the catalogue does not offer
   them.
@@ -1041,14 +1071,20 @@ principles and the verified end-to-end run.
   `mlx-lm` runtime, an MLX catalogue with real sources, whole-repo fetching that
   never lists a half-download, and a refusal with a reason for anything the runtime
   cannot load.
+- **MLX conversion and quantisation** — `convert` (quantising in the same pass, with
+  mixed-precision recipes) and `dynamic_quant` (per-layer bits for a target BPW) as
+  two entries in the tool catalogue, so the forms, the streaming log and the result
+  card come from the same machinery every llama.cpp tool uses. Every flag they emit
+  was checked against the installed runtime's own `--help`.
 - **Desktop shell** — Tauri 2 configuration for macOS, Linux and Windows.
 
 ### Next
 
-- **MLX conversion and quantisation.** `mlx-lm` ships `convert` with per-layer mixed
-  precision. Osama fetches and serves MLX models but does not yet make them;
-  exposing `mlx_lm.convert` behind the same process/result card the other tools use
-  is the obvious next step.
+- **The rest of mlx-lm.** `convert` takes four flags Osama does not offer yet
+  (`--upload-repo`) and five siblings on the same page deserve a spec: `mlx_lm.fuse`
+  (an adapter into an MLX model), `mlx_lm.evaluate` and `mlx_lm.perplexity` (the MLX
+  half of the Evaluate page), `mlx_lm.generate` for a one-shot comparison. GGUF → MLX
+  waits on a `--gguf-path` flag mlx-lm 0.32 does not have.
 - **A model on first run.** Osama ships no weights and makes you find them.
   A guided first-run that offers a small recommended model for your hardware
   would close the biggest gap between "installed" and "answering".

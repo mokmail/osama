@@ -619,6 +619,30 @@ export function mlxServeCommand(
  * reads for the Library.
  */
 /**
+ * The console script for an mlx-lm tool, from Osama's own environment.
+ *
+ * Same reasoning as the server: a tool must be run by the interpreter that owns its
+ * packages, not by whatever `python3` happens to be first on the PATH. Refuses with a
+ * sentence when the platform cannot run MLX at all, or when the environment has not
+ * been built yet — both of which the user can act on.
+ */
+export function mlxToolPath(name: string): string {
+  const support = mlxSupport();
+  if (!support.supported) throw new Error(support.reason ?? "MLX is not supported on this machine.");
+  const p = mlxPaths();
+  const script = path.join(p.bin, name);
+  if (!fs.existsSync(script)) {
+    throw new Error(`${name} is not installed in ${p.bin} — build or update the MLX environment from the Models page`);
+  }
+  return script;
+}
+
+/** Where an mlx-lm tool runs: the models directory, so a relative output lands with the models. */
+export function mlxToolCwd(): string {
+  return paths().models;
+}
+
+/**
  * The architectures the managed mlx-lm implements, read from its own package.
  *
  * mlx-lm ships one module per architecture, so the module names *are* the list of

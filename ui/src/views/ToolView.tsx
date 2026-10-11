@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { CheckCircle2, FolderOpen, Lightbulb, PackagePlus, Play, RefreshCw, Settings2, Terminal, Wrench, XCircle, Zap } from "lucide-react";
-import { api } from "../lib/api";
+import { api, mlxApi } from "../lib/api";
 import type { LocalModel, ManagedProcess, ParamSpec, ToolSpec } from "../lib/types";
 import { Badge, Button, Card, CardHead, Console, Empty, Field, Spinner, useToast } from "../components/ui";
 import { GgufPicker } from "../components/GgufPicker";
@@ -14,6 +14,19 @@ const GROUP_ORDER = ["Model", "Performance", "Prompt", "Sampling", "Constraints"
 export function ToolView({ group, bus }: { group: string; bus: EventBus }) {
   const [tools, setTools] = useState<ToolSpec[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
+  /**
+   * An MLX tool can be reached by URL on a machine that cannot run MLX. The nav hides
+   * it, and the routes refuse it, but a form that produces a guaranteed failure is
+   * still worth explaining rather than showing.
+   */
+  const [mlxReason, setMlxReason] = useState<string | null>(null);
+  useEffect(() => {
+    if (!tools.some((t) => t.engine === "mlx")) return;
+    mlxApi
+      .status()
+      .then((s) => setMlxReason(s.support.supported ? null : (s.support.reason ?? "MLX is not supported on this machine.")))
+      .catch(() => {});
+  }, [tools]);
 
   useEffect(() => {
     api.tools().then((r) => {
@@ -34,7 +47,13 @@ export function ToolView({ group, bus }: { group: string; bus: EventBus }) {
           </button>
         ))}
       </div>
-      {active ? <ToolRunner spec={active} bus={bus} /> : <Empty title="No tools in this group" />}
+      {active && active.engine === "mlx" && mlxReason ? (
+        <Empty title="MLX is not available on this machine" sub={mlxReason} />
+      ) : active ? (
+        <ToolRunner spec={active} bus={bus} />
+      ) : (
+        <Empty title="No tools in this group" />
+      )}
     </div>
   );
 }
@@ -51,6 +70,8 @@ function summariseRun(lines: string[]): {
   outputSize?: string; outputBpw?: number;
   quantizeTime?: string; totalTime?: string;
   parts?: number;
+  /** MLX: what dynamic quantisation decided, and what it cost in memory. */
+  bpw?: number; peakMemory?: string; dtype?: string;
 } {
   const s: ReturnType<typeof summariseRun> = {};
   for (const l of lines) {
@@ -63,13 +84,37 @@ function summariseRun(lines: string[]): {
     m = /total time\s*=\s*([\d.]+)\s*(\w+)/.exec(l);
     if (m) { s.totalTime = `${m[1]} ${m[2]}`; continue; }
     m = /split into\s*(\d+)\s*parts/.exec(l);
-    if (m) { s.parts = Number(m[1]); }
+    if (m) { s.parts = Number(m[1]); continue; }
+    // mlx-lm's own summary lines, taken from a real run:
+    //   [INFO] Quantized model with 3.993 bits per weight.
+    //   Peak memory used: 4.250GB
+    m = /Quantized model with\s*([\d.]+)\s*bits per weight/.exec(l);
+    if (m) { s.bpw = Number(m[1]); continue; }
+    m = /Peak memory used:\s*([\d.]+)\s*GB/.exec(l);
+    if (m) { s.peakMemory = `${m[1]} GB`; continue; }
+    m = /\[INFO\]\s*Using dtype:\s*(\w+)/.exec(l);
+    if (m) { s.dtype = m[1]; }
   }
   return s;
 }
 
 /** Tensor progress: `[  12/ 291] blk.0.attn_q.weight - [ 4096, 4096], …` */
 const TENSOR_PROGRESS = /^\[\s*(\d+)\s*\/\s*(\d+)\s*\]\s*(\S+)/;
+
+/**
+ * mlx-lm's progress, which is tqdm rather than a tensor counter:
+ *   `Estimating sensitivities:  42%|████▏     | 29/69 [00:12<00:17,  1.94it/s]`
+ *   `Fetching 12 files: 100%|██████████| 12/12 [00:06<00:00,  1.91it/s]`
+ * The phase name is the useful part — "Estimating sensitivities" tells the user what
+ * the wait is for, which no percentage can.
+ */
+function mlxProgress(lines: string[]): { label: string; pct: number } | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = /^(.+?):\s*(\d+)%\|/.exec(lines[i]!.trim());
+    if (m?.[1]) return { label: m[1].trim(), pct: Number(m[2]) };
+  }
+  return null;
+}
 
 function tensorProgress(lines: string[]): { done: number; total: number; tensor: string } | null {
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -85,8 +130,26 @@ function tensorProgress(lines: string[]): { done: number; total: number; tensor:
  * llama-quantize's errors are one line in a thousand-line log; naming the flag
  * that resolves them is the difference between "it failed" and "do this".
  */
-function failureHint(lines: string[], code: number | null): string | null {
+function failureHint(lines: string[], code: number | null, engine: "llamacpp" | "mlx" = "llamacpp"): string | null {
   const text = lines.slice(-40).join("\n");
+  if (engine === "mlx") {
+    // The one that bit us: dynamic quantisation measures sensitivities with gradients,
+    // and a model that is already quantised has no trainable weights to measure — mlx
+    // raises "Must specify at least one argument" rather than saying "nothing to do".
+    if (/Must specify at least one argument|trainable_parameters/i.test(text)) {
+      return "There is nothing left to measure: this model is already quantised. Dynamic quantisation needs a full-precision MLX model — convert it without Quantize, then quantise that.";
+    }
+    if (/Repository Not Found|gated|401|403/i.test(text)) {
+      return "The model could not be fetched. Check the repo id — it must be a Hugging Face transformers model (or an MLX folder on disk) — and set HF_TOKEN for a gated repo.";
+    }
+    if (/No module named|not installed/i.test(text)) {
+      return "The MLX environment is missing something this tool needs — build or update it from the Models page.";
+    }
+    if (code !== null && code !== 0) {
+      return `The MLX tool exited with code ${code}; the last lines of the log above say why.`;
+    }
+    return null;
+  }
   if (/already quantized|not a valid model with quantization/i.test(text)) {
     return "This file is already quantized. Under “Show advanced options”, tick “Allow requantize” and run it again.";
   }
@@ -188,6 +251,8 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
   }, [bus.events, spec.id, since]);
 
   const progress = useMemo(() => tensorProgress(run.lines), [run.lines]);
+  /** MLX tools draw a tqdm bar per phase instead of a tensor counter. */
+  const mlxSteps = useMemo(() => (spec.engine === "mlx" ? mlxProgress(run.lines) : null), [spec.engine, run.lines]);
   const summary = useMemo(() => summariseRun(run.lines), [run.lines]);
   const running = starting ? !run.finished : run.running;
 
@@ -203,7 +268,9 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
 
   /** The output path: what the user typed, else the second positional argument. */
   const outputPath = useMemo(() => {
-    const typed = String(values.output ?? "").trim();
+    // LLama.cpp tools have an explicit output argument; an MLX tool is told where to
+    // write with --mlx-path, which is a directory rather than a file.
+    const typed = String(values.output ?? values.mlxPath ?? "").trim();
     if (typed) return typed;
     const argv = run.command ? run.command.split(" ") : [];
     return argv.length >= 3 && argv[1] === "-m" ? "" : (argv[2] ?? "");
@@ -217,7 +284,19 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
     setOutBytes(null);
     if (!run.finished || !run.result || run.result.code !== 0) return;
     const path = outputPath;
-    if (!path || !path.endsWith(".gguf")) return;
+    if (!path) return;
+    // An MLX model is a directory, and `/api/browse` lists a folder's *entries* — for a
+    // directory of files it returns nothing to size. The MLX route describes the model
+    // itself (the same call the library card makes), which is the honest number.
+    if (spec.engine === "mlx") {
+      let alive = true;
+      mlxApi
+        .inspect(path)
+        .then((r) => { if (alive) setOutBytes(r.model?.sizeBytes ?? null); })
+        .catch(() => {});
+      return () => { alive = false; };
+    }
+    if (!path.endsWith(".gguf")) return;
     const slash = path.lastIndexOf("/");
     const dir = slash > 0 ? path.slice(0, slash) : ".";
     const name = path.slice(slash + 1);
@@ -278,9 +357,13 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
 
   const code = run.result?.code ?? null;
   const failed = Boolean(run.error) || (code !== null && code !== 0);
-  const hint = run.finished && failed ? failureHint(run.lines, code) : null;
+  const hint = run.finished && failed ? failureHint(run.lines, code, spec.engine ?? "llamacpp") : null;
   const elapsedMs = running && run.startedAt ? now - run.startedAt : (run.finishedAt && run.startedAt ? run.finishedAt - run.startedAt : 0);
-  const pct = progress && progress.total > 0 ? Math.max(1, Math.min(100, Math.round((progress.done / progress.total) * 100))) : null;
+  const pct = spec.engine === "mlx"
+    ? (mlxSteps ? Math.max(1, Math.min(100, mlxSteps.pct)) : null)
+    : progress && progress.total > 0
+      ? Math.max(1, Math.min(100, Math.round((progress.done / progress.total) * 100)))
+      : null;
   const outInLibrary = Boolean(outputPath) && models.some((m) => m.file === outputPath);
 
   return (
@@ -362,7 +445,13 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
         <Card className="card-pad">
           <CardHead
             title="Process"
-            sub={progress ? `tensor ${progress.done} of ${progress.total}` : "waiting for the first tensor…"}
+            sub={
+              spec.engine === "mlx"
+                ? (mlxSteps ? mlxSteps.label : "waiting for the tool to report…")
+                : progress
+                  ? `tensor ${progress.done} of ${progress.total}`
+                  : "waiting for the first tensor…"
+            }
             right={<span className="faint mono small">{formatMs(elapsedMs)}</span>}
           />
           {pct !== null && (
@@ -383,6 +472,19 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
                 <dt>Source</dt><dd>{summary.inputSize} <span className="faint">{summary.inputBpw} BPW</span></dd>
                 {summary.outputSize && <dt>Target</dt>}
                 {summary.outputSize && <dd>{summary.outputSize} <span className="faint">{summary.outputBpw} BPW</span></dd>}
+              </dl>
+            </>
+          )}
+          {summary.bpw !== undefined && (
+            <>
+              <div className="hr" />
+              <dl className="kv">
+                <dt>Quantised to</dt>
+                <dd>{summary.bpw} bits per weight <span className="faint">(the tool's own number, for the whole model)</span></dd>
+                {summary.peakMemory && <dt>Peak memory</dt>}
+                {summary.peakMemory && <dd>{summary.peakMemory}</dd>}
+                {summary.dtype && <dt>Dtype</dt>}
+                {summary.dtype && <dd className="mono small">{summary.dtype}</dd>}
               </dl>
             </>
           )}
@@ -436,7 +538,7 @@ export function ToolRunner({ spec, bus }: { spec: ToolSpec; bus: EventBus }) {
 
           <div className="hr" />
           <div className="row wrap" style={{ gap: 9, alignItems: "center" }}>
-            {!failed && outputPath && !outInLibrary && (
+            {spec.engine !== "mlx" && !failed && outputPath && !outInLibrary && (
               <Button
                 variant="primary"
                 disabled={adding || outBytes === 0}

@@ -4,6 +4,9 @@
  * Every flag here is exercised against the installed build by
  * `scripts/probe-flags.mjs`; a flag the build rejects fails that script.
  */
+import path from "node:path";
+import os from "node:os";
+import { paths } from "../paths.js";
 import {
   modelParams,
   performanceParams,
@@ -398,6 +401,170 @@ export const TOOLS: Record<ToolId, ToolSpec> = {
       { key: "cache", flag: "-c", aliases: ["--cache"], type: "bool", label: "Enable local cache", group: "RPC", order: 5, advanced: true },
     ],
   },
+
+  /**
+   * MLX conversion — which is also MLX quantisation.
+   *
+   * `mlx_lm.convert` turns a Hugging Face model into MLX format, and `-q` makes that
+   * same pass write quantised weights. That is the honest difference from the
+   * llama.cpp side, where llama-quantize is a second pass over an existing GGUF: here
+   * "convert" and "quantise" are one step, and the tool is named for what comes first.
+   */
+  "mlx-convert": {
+    id: "mlx-convert",
+    binary: "mlx_lm.convert",
+    engine: "mlx",
+    title: "Convert (MLX)",
+    summary: "Turn a Hugging Face model into an MLX model — unquantised, or quantised in the same pass.",
+    group: "mlx",
+    mode: "oneshot",
+    notes: [
+      "The input is a Hugging Face model: a repo id, or a folder holding config.json, the tokenizer and .safetensors weights (what `transformers` saves). An MLX model is what comes OUT — this tool cannot read an MLX directory.",
+      "Quantisation is not a second pass here. Tick it and the conversion writes quantised weights directly, at the bit width, group size and mode you choose.",
+      "Mixed precision is the lever for a model that will not otherwise fit: instead of one bit width everywhere, a recipe puts more bits in the layers that notice and fewer in the ones that do not. It costs time, because sensitivities are measured first.",
+      "The output is an ordinary directory under your models folder: it appears in the library as soon as it is complete, and serves like any other MLX model.",
+    ],
+    params: [
+      {
+        key: "hfPath", flag: "--hf-path", aliases: ["--model"], type: "string",
+        label: "Hugging Face model", group: "Input", order: 1, required: true,
+        help: "A repo id, or a local folder with config.json + tokenizer + .safetensors.",
+        example: "mlx-community/Qwen2.5-0.5B-Instruct",
+      },
+      {
+        key: "mlxPath", flag: "--mlx-path", type: "string",
+        label: "Output folder", group: "Input", order: 2, required: true,
+        help: "An absolute path. Under the models folder, the library picks it up the moment it is complete.",
+        example: path.join(paths().models, "Qwen2.5-0.5B-Instruct-mlx-4bit"),
+      },
+      {
+        key: "quantize", flag: "-q", type: "bool",
+        label: "Quantize while converting", group: "Quantisation", order: 1,
+        help: "Without this the copy keeps the source dtype (float16/bfloat16) — correct, and several times larger.",
+      },
+      {
+        key: "qBits", flag: "--q-bits", type: "enum", enum: ["2", "3", "4", "5", "6", "8"],
+        enumHelp: {
+          "2": "Smallest. Chat stays coherent; anything factual degrades badly.",
+          "3": "A common compromise for a large model that must fit.",
+          "4": "The default choice: about a quarter of float16, and hard to tell apart in conversation.",
+          "5": "Slightly safer than 4, uncommon — prefer 4 or 6.",
+          "6": "Better than 4 at roughly 1.5x the size.",
+          "8": "Near-lossless, half of float16.",
+        },
+        label: "Bits per weight", group: "Quantisation", order: 2, requires: ["quantize"],
+        help: "Used when Quantize is on. Ignored otherwise, and not emitted into the command.",
+      },
+      {
+        key: "qGroupSize", flag: "--q-group-size", type: "enum", enum: ["32", "64", "128"],
+        enumHelp: {
+          "32": "Smaller groups track the weights more closely: better quality, slightly larger.",
+          "64": "The usual default.",
+          "128": "Faster and smaller, a little coarser.",
+        },
+        label: "Group size", group: "Quantisation", order: 3, requires: ["quantize"],
+      },
+      {
+        key: "qMode", flag: "--q-mode", type: "enum", enum: ["affine", "mxfp4", "nvfp4", "mxfp8"],
+        enumHelp: {
+          "affine": "The standard scale + zero-point scheme: what nearly every MLX model on the Hub uses.",
+          "mxfp4": "Microscaling 4-bit float, in the style of the OCP MX formats.",
+          "nvfp4": "NVIDIA's 4-bit float format. MLX reads it; other runtimes usually cannot.",
+          "mxfp8": "Microscaling 8-bit float.",
+        },
+        label: "Quantisation mode", group: "Quantisation", order: 4, advanced: true, requires: ["quantize"],
+      },
+      {
+        key: "quantPredicate", flag: "--quant-predicate", type: "enum",
+        enum: ["mixed_2_6", "mixed_3_4", "mixed_3_6", "mixed_4_6"],
+        enumHelp: {
+          "mixed_2_6": "2- and 6-bit layers: the smallest recipe.",
+          "mixed_3_4": "3- and 4-bit layers.",
+          "mixed_3_6": "3- and 6-bit layers — a good fit for a dense model squeezed hard.",
+          "mixed_4_6": "4- and 6-bit layers: the gentlest, when quality matters more than size.",
+        },
+        label: "Mixed precision recipe", group: "Quantisation", order: 5, requires: ["quantize"],
+        help: "Per-layer bits instead of one width everywhere. Takes precedence over Bits per weight.",
+      },
+      {
+        key: "dtype", flag: "--dtype", type: "enum", enum: ["float16", "bfloat16", "float32"],
+        label: "Dtype for unquantised weights", group: "Quantisation", order: 6, advanced: true, requires: ["quantize"],
+        help: "Applies to the weights a mixed-precision recipe leaves unquantised.",
+      },
+      {
+        key: "dequantize", flag: "-d", aliases: ["--dequantize"], type: "bool",
+        label: "Dequantize instead", group: "Quantisation", order: 7, advanced: true,
+        help: "Reads a quantised model and writes it back to full precision.",
+      },
+      {
+        key: "trustRemoteCode", flag: "--trust-remote-code", type: "bool",
+        label: "Trust remote code", group: "Advanced", order: 1, advanced: true,
+        help: "For repos whose tokenizer loader needs custom Python. It runs that code.",
+      },
+    ],
+  },
+
+  /**
+   * Dynamic quantisation: the second pass, on a model that is already MLX.
+   *
+   * One bit width for every layer is a compromise. This measures how much each layer
+   * cares — with gradients — and spends the bits where they are noticed. Slower than
+   * a convert, and the thing that makes a tight memory budget work.
+   */
+  "mlx-dynamic-quant": {
+    id: "mlx-dynamic-quant",
+    binary: "mlx_lm.dynamic_quant",
+    engine: "mlx",
+    title: "Dynamic quantisation",
+    summary: "Quantise an MLX model you already have, choosing the bit width per layer for a target bits-per-weight.",
+    group: "mlx",
+    mode: "oneshot",
+    notes: [
+      "The input is an MLX model directory — convert first if what you have is a Hugging Face checkpoint.",
+      "The target is an average: the tool splits the layers into a high-bit and a low-bit group, and measures sensitivities to decide which is which.",
+      "Measuring sensitivities means gradients, so this is the slowest thing on this page. Report perplexity measures the base model too, which doubles it again.",
+      "The output is a new directory; the original is left untouched.",
+      "While it measures, it writes a `<model>_sensitivities.json` file into the working directory (your models folder). Keep it and pass it back with Sensitivities JSON to skip the measurement next time.",
+    ],
+    params: [
+      {
+        key: "model", flag: "--model", type: "string",
+        label: "MLX model folder", group: "Input", order: 1, required: true,
+        help: "A directory with config.json and .safetensors weights — an MLX model, not a GGUF. It must be full precision: sensitivities are gradients on the weights, and an already-quantised model has none to measure.",
+        example: path.join(paths().models, "Qwen2.5-7B-Instruct-4bit"),
+      },
+      {
+        key: "mlxPath", flag: "--mlx-path", type: "string",
+        label: "Output folder", group: "Input", order: 2, required: true,
+        help: "An absolute path, and not the input folder.",
+        example: path.join(paths().models, "Qwen2.5-7B-Instruct-dynamic-4bit"),
+      },
+      {
+        key: "targetBpw", flag: "--target-bpw", type: "number",
+        label: "Target bits per weight", group: "Quantisation", order: 1,
+        help: "The average to aim for. 4 is the usual choice.",
+        example: "4",
+      },
+      { key: "lowBits", flag: "--low-bits", type: "enum", enum: ["2", "3", "4"], label: "Low group bits", group: "Quantisation", order: 2 },
+      { key: "lowGroupSize", flag: "--low-group-size", type: "enum", enum: ["32", "64", "128"], label: "Low group size", group: "Quantisation", order: 3, advanced: true },
+      { key: "highBits", flag: "--high-bits", type: "enum", enum: ["4", "6", "8"], label: "High group bits", group: "Quantisation", order: 4 },
+      { key: "highGroupSize", flag: "--high-group-size", type: "enum", enum: ["32", "64", "128"], label: "High group size", group: "Quantisation", order: 5, advanced: true },
+      {
+        key: "reportPpl", flag: "--report-ppl", type: "bool",
+        label: "Report perplexity", group: "Measurement", order: 1,
+        help: "Measures the base model and the quantised one. Honest numbers, and a long wait.",
+      },
+      { key: "sensitivities", flag: "--sensitivities", type: "string", label: "Sensitivities JSON", group: "Advanced", order: 1, advanced: true,
+        help: "Reuse an earlier run's sensitivity file instead of measuring again." },
+      { key: "seed", flag: "--seed", type: "number", label: "Seed", group: "Advanced", order: 2, advanced: true,
+        help: "For a reproducible measurement." },
+      { key: "gradCheckpoint", flag: "--grad-checkpoint", type: "bool", label: "Gradient checkpointing", group: "Advanced", order: 3, advanced: true,
+        help: "Less memory while measuring, a little slower." },
+      { key: "accumulationDtype", flag: "--accumulation-dtype", type: "enum", enum: ["float32", "bfloat16"], label: "Accumulation dtype", group: "Advanced", order: 4, advanced: true,
+        help: "What the sensitivities accumulate in. float32 is the careful default." },
+      { key: "trustRemoteCode", flag: "--trust-remote-code", type: "bool", label: "Trust remote code", group: "Advanced", order: 5, advanced: true },
+    ],
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -406,6 +573,19 @@ export const TOOLS: Record<ToolId, ToolSpec> = {
 
 function isTruthy(v: unknown): boolean {
   return v !== undefined && v !== null && v !== "" && v !== false;
+}
+
+/**
+ * `~/x` is a shell convenience, and argv arrays never see a shell.
+ *
+ * A path typed as `~/Downloads/model.gguf` would otherwise become a literal directory
+ * called `~` next to the process's cwd — which, for an output path, means the tool
+ * "succeeds" while writing somewhere the user will never find. Harmless to expand:
+ * no flag value legitimately begins with a tilde.
+ */
+function expandHome(value: string): string {
+  if (value === "~") return os.homedir();
+  return value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
 }
 
 /** Split a repeatable value into its individual entries. */
@@ -461,8 +641,8 @@ export function buildArgv(toolId: ToolId, values: ParamValues): string[] {
       else for (const entry of parts) argv.push(p.flag, entry);
       return;
     }
-    if (p.positional) argv.push(String(raw));
-    else argv.push(p.flag, String(raw));
+    if (p.positional) argv.push(expandHome(String(raw)));
+    else argv.push(p.flag, expandHome(String(raw)));
   };
 
   // 1) options, in declaration order  2) positionals, in declaration order

@@ -215,19 +215,27 @@ export const modelRoutes: RouteModule = (deps) => [
     let spec: core.ToolSpec;
     let argv: string[];
     let binary: string;
+    let engine: "llamacpp" | "mlx" = "llamacpp";
     try {
       toolId = body.tool as core.ToolId;
       spec = core.toolSpec(toolId);
+      engine = spec.engine ?? "llamacpp";
       argv = core.buildArgv(toolId, body.values ?? {});
-      binary = core.resolveTool(spec.binary);
+      // Two engines, two ways to find the thing that runs: an executable inside the
+      // installed llama.cpp build, or a console script inside Osama's MLX environment.
+      binary = engine === "mlx" ? core.mlxToolPath(spec.binary) : core.resolveTool(spec.binary);
     } catch (e) {
-      return fail(res, 400, e);
+      // An MLX tool on a machine that cannot run MLX is a platform answer, not a bad
+      // request; say which it is.
+      return fail(res, engine === "mlx" ? 409 : 400, e);
     }
     const runId = `run_${Date.now().toString(36)}`;
     deps.broadcast("run", { id: runId, tool: toolId, stage: "start", command: core.renderCommand(spec.binary, argv) });
     core
       .runToCompletion(binary, argv, {
-        cwd: body.cwd ?? core.paths().home,
+        cwd: body.cwd ?? (engine === "mlx" ? core.mlxToolCwd() : core.paths().home),
+        // The MLX interpreter must not inherit the launcher's PYTHONPATH (see mlx.ts).
+        env: engine === "mlx" ? core.mlxProcessEnv() : undefined,
         onLine: (line) => deps.broadcast("run", { id: runId, tool: toolId, line }),
       })
       .then((result) => {

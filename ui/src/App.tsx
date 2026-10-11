@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Activity, Boxes, Cpu, Download, FileCog, FileCode2, Gauge, HardDrive, Layers, LayoutDashboard, Menu,
-  MessagesSquare, PanelLeftClose, PanelLeftOpen, Plug, Server as ServerIcon, ShieldCheck, Terminal, Wrench,
+  MessagesSquare, PanelLeftClose, PanelLeftOpen, Plug, Server as ServerIcon, ShieldCheck, Sparkles, Terminal, Wrench,
 } from "lucide-react";
-import { api, subscribeEvents } from "./lib/api";
+import { api, mlxApi, subscribeEvents } from "./lib/api";
 import type { OsamaEvent, SystemResponse } from "./lib/types";
 import { ToastProvider, useToast } from "./components/ui";
 import { Dashboard } from "./views/Dashboard";
@@ -34,12 +34,14 @@ export type ViewId =
   | "inspect"
   | "processes"
   | "artifacts"
-  | "mcp";
+  | "mcp"
+  /** MLX tools — conversion and quantisation, Apple silicon only. */
+  | "mlx";
 
 /** Every view id, for validating a hash or a stored choice before trusting it. */
 const VIEW_IDS: ViewId[] = [
   "dashboard", "chat", "models", "hub", "engine", "server", "run",
-  "create", "quantize", "edit", "lora", "evaluate", "inspect", "processes", "artifacts", "mcp",
+  "create", "quantize", "edit", "lora", "evaluate", "inspect", "processes", "artifacts", "mcp", "mlx",
 ];
 
 const NAV: Array<{ group: string; items: Array<{ id: ViewId; label: string; icon: typeof Cpu }> }> = [
@@ -75,6 +77,7 @@ const NAV: Array<{ group: string; items: Array<{ id: ViewId; label: string; icon
       { id: "lora", label: "Merge LoRA", icon: Layers },
       { id: "evaluate", label: "Evaluate", icon: Gauge },
       { id: "inspect", label: "Inspect", icon: ShieldCheck },
+      { id: "mlx", label: "MLX tools", icon: Sparkles },
     ],
   },
   {
@@ -103,6 +106,16 @@ function Shell() {
   const [system, setSystem] = useState<SystemResponse | null>(null);
   const [events, setEvents] = useState<OsamaEvent[]>([]);
   const [navOpen, setNavOpen] = useState(false);
+  /**
+   * MLX is Apple silicon only, and the nav should not offer a page that cannot work
+   * here — no item, no dead end, no "unsupported" line to read. The status call is
+   * cheap and cached by the engine; everything else about the OS gate lives in the
+   * routes, which refuse anyway.
+   */
+  const [mlxSupported, setMlxSupported] = useState(false);
+  useEffect(() => {
+    mlxApi.status().then((s) => setMlxSupported(s.support.supported)).catch(() => {});
+  }, []);
   /**
    * The desktop rail: the sidebar collapses to icons and the choice survives a
    * reload. It is a desktop idea only — under 860px the sidebar is a drawer and
@@ -168,7 +181,9 @@ function Shell() {
         {NAV.map((group) => (
           <div className="nav-group" key={group.group}>
             <div className="nav-group-label">{group.group}</div>
-            {group.items.map((item) => {
+            {group.items
+              .filter((item) => item.id !== "mlx" || mlxSupported)
+              .map((item) => {
               const Icon = item.icon;
               return (
                 <button
@@ -184,8 +199,8 @@ function Shell() {
                   <Icon />
                   <span className="nav-label">{item.label}</span>
                 </button>
-              );
-            })}
+                );
+              })}
           </div>
         ))}
         {/* The chat view portals its insights in here when it is on screen. */}
@@ -243,6 +258,7 @@ function Shell() {
             {view === "processes" && <ProcessesView bus={bus} />}
             {view === "artifacts" && <ArtifactsView bus={bus} />}
             {view === "mcp" && <McpView bus={bus} onNavigate={setView} />}
+            {view === "mlx" && <ToolView group="mlx" bus={bus} />}
           </div>
         </div>
       </main>

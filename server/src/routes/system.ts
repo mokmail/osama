@@ -112,7 +112,10 @@ export const systemRoutes: RouteModule = (deps) => [
     try {
       const spec = core.toolSpec(body.tool);
       const argv = core.buildArgv(body.tool, body.values ?? {});
-      json(res, 200, { binary: spec.binary, argv, command: core.renderCommand(spec.binary, argv) });
+      // An MLX tool's binary is a console script in Osama's own environment, and the
+      // preview has to name that path or the copy-pasteable command would be a lie.
+      const binary = (spec.engine ?? "llamacpp") === "mlx" ? core.mlxToolPath(spec.binary) : spec.binary;
+      json(res, 200, { binary, argv, command: core.renderCommand(binary, argv) });
     } catch (e) {
       json(res, 400, { error: (e as Error).message });
     }

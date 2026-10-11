@@ -116,7 +116,9 @@ column is verifiable in this repo.
 
 ## What you get in the first ten minutes
 
-1. `./start.sh` — the app opens on <http://127.0.0.1:5178>, no model shipped.
+1. `./start.sh` — the app opens on <http://127.0.0.1:5178>. No model is shipped, so the
+   Dashboard offers one: the smallest model that suits this machine, MLX or GGUF, with the
+   size read from the Hub rather than guessed, and one button to fetch it.
 2. **llama.cpp** — install an engine build: the latest upstream release, for your
    OS, architecture and backend.
 3. **Models** — one page for both halves: what you have, and **Discover** below it
@@ -124,8 +126,9 @@ column is verifiable in this repo.
    downloads, split parts and sizes, and quantisations read from the file headers.
 4. **MLX, on Apple silicon** — one **Update** builds Apple's runtime in a private
    environment, then the MLX catalogue fetches a conversion; it appears beside your
-   GGUF models, fetched whole or not at all. **MLX tools** goes the other way: convert
-   a Hugging Face model to MLX, quantise it on the way, or re-quantise one you have.
+   GGUF models, fetched whole or not at all. **MLX tools** goes the other way: convert a
+   Hugging Face model to MLX, quantise it on the way, fold a trained adapter in, score it on
+   a harness task, measure what it costs in perplexity, or push it to the Hub.
 5. **Server** — start a server on the model you picked, with every flag
    explained, then chat with it in **Chat** — switch the provider to MLX if that is
    what you are serving.
@@ -307,7 +310,7 @@ See [Headless CLI](#headless-cli) for the full command set.
 | | Merge LoRA | Fold a LoRA adapter into a base model and resave a standalone GGUF |
 | | Evaluate | `llama-bench`, `llama-batched-bench`, `llama-perplexity` |
 | | Inspect | `llama-tokenize`, `llama-fit-params` |
-| | MLX tools | **Convert (MLX)** — a Hugging Face model into an MLX one, quantised in the same pass if you want — and **Dynamic quantisation**, per-layer bits for a target bits-per-weight. Apple silicon only: the entry is absent everywhere else |
+| | MLX tools | Seven tabs for `mlx-lm`'s own commands: **Convert** (Hugging Face → MLX, quantised in the same pass), **Dynamic quantisation** (per-layer bits for a target bits-per-weight), **Fuse adapter**, **Evaluate** and **Perplexity** (harness tasks, and the number that compares two models), **Generate** (one prompt, one answer, with timings) and **Upload to the Hub**. Apple silicon only: the entry is absent everywhere else |
 | **System** | llama.cpp | Engine builds: releases, install, activate, remove |
 | | MCP | Model Context Protocol servers — presets, connect, and the tools they expose |
 
@@ -317,9 +320,11 @@ Models page, so older links keep working.
 
 ### The llama.cpp tools
 
-Osama drives **fifteen** binaries from the Tools views, each generated from one
-catalogue (`core/src/commands/`) so adding a flag to the catalogue adds it to
-the GUI. The release itself ships more than that (per-model CLIs, the unified
+Osama drives **sixteen front-ends over fifteen** binaries from the Tools views
+(`GET /api/tools` is the list; GGUF metadata editing and LoRA merging are the two extra
+front-ends, over `llama-quantize` and `llama-export-lora`). Each is generated from one
+catalogue (`core/src/commands/`) so adding a flag to the catalogue adds it to the GUI,
+and each flag in it is checked against the installed build's own `--help`. The release itself ships more than that (per-model CLIs, the unified
 `llama` front-end, `ggml-metal-tuning`); the dashboard counts coverage against
 the whole shipped set and reports how many of them are drivable:
 
@@ -483,12 +488,15 @@ folder you merely pointed at is never touched), and not currently served. If it 
 being served — or is stuck loading — the refusal carries the way out: stop the server
 and delete, from the same dialog.
 
-### Converting and quantising
+### The MLX tools page
 
-The **MLX tools** page holds the two things that *make* an MLX model rather than fetch
-one, run through the same contract as the llama.cpp tools: a command you can read
-before it runs, a live log, and a result card reporting the numbers the tool printed
-itself.
+Seven tabs for the `mlx-lm` commands Osama drives — the server has its own view, and
+training (`mlx_lm.lora`) is still ahead — each running through the same contract as the
+llama.cpp tools: a command you can read before it runs, a live log, and a result card
+reporting the numbers the tool printed itself. Apple silicon only; the page is absent
+everywhere else.
+
+**Making a model**
 
 - **Convert (MLX)** — `mlx_lm.convert`: a Hugging Face model in, an MLX directory out.
   Quantisation is not a second pass here: tick **Quantize** and that same pass writes
@@ -504,8 +512,43 @@ itself.
   specify at least one argument`, which the app translates into that sentence instead
   of a traceback.
 
-Both write a directory you can serve immediately — the library picks it up the moment
-it is complete. The result card shows the output folder with the size actually on disk,
+**Merging and exporting**
+
+- **Fuse adapter (MLX)** — `mlx_lm.fuse`: folds a trained LoRA adapter into its base model
+  and saves the result as a standalone model, which is what you serve. Training itself is
+  not in the app yet, so the adapter has to come from `mlx_lm.lora` on the command line.
+  `--export-gguf` is the one direction mlx-lm can write *toward* llama.cpp, and only for
+  llama, mistral and mixtral architectures.
+
+**Measuring**
+
+- **Evaluate (MLX)** — `mlx_lm.evaluate`: lm-evaluation-harness tasks (`gsm8k`, `mmlu`,
+  `hellaswag`…) scored against your model, with **Examples per task** as the dial that keeps
+  a run to minutes instead of hours. Results are written as JSON into the output folder. This
+  is the MLX half of the Evaluate page: `llama-perplexity` measures a GGUF, `mlx_lm.perplexity`
+  measures an MLX model, and they are the same measurement on two engines.
+- **Perplexity (MLX)** — `mlx_lm.perplexity`: the one number that compares two models, or two
+  quantisations of one, without a task suite. Lower is better, and it only means anything
+  between runs on the same data, sequence length and sample count — which is why each of
+  those is a field on the form rather than a fixed default.
+
+**Comparing and distributing**
+
+- **Generate (MLX)** — `mlx_lm.generate`: one prompt in, one answer out, with the token count
+  and the tokens per second that make two builds comparable. The same engine the server runs,
+  without the server.
+- **Upload to the Hub (MLX)** — `mlx_lm.upload`: pushes a model folder to the Hugging Face Hub,
+  creating the repo if it does not exist. **Convert** and **Fuse adapter** also take an
+  `--upload-repo` and do exactly this at the end of their own run.
+
+Two of those tabs need packages that mlx-lm does not install by default —
+lm-evaluation-harness for **Evaluate** and `datasets` for **Perplexity**'s data loader. A run
+without them fails on the import before it reads a single argument, so the form names what is
+missing, refuses to run, and offers **Install extras**, which adds `mlx-lm[evaluate,train]` to
+the environment Osama already owns. `POST /api/run` refuses the same run for the same reason.
+
+Convert and Dynamic quantisation write a directory you can serve immediately — the
+library picks it up the moment it is complete. The result card shows the output folder with the size actually on disk,
 the tool's own summary (`Quantized model with 3.993 bits per weight.`, `Peak memory
 used: 4.250GB`), and the phase the tool is in while it runs ("Estimating
 sensitivities"), read from its tqdm bars rather than a generic spinner.
@@ -513,8 +556,10 @@ sensitivities"), read from its tqdm bars rather than a generic spinner.
 ### What MLX does not give you
 
 - **Quantising is converting.** There is no separate MLX quantiser: `convert -q` and
-  `dynamic_quant` are the two ways, and both are on the MLX tools page. There is also
-  no GGUF → MLX path yet, because the `--gguf-path` flag landed after mlx-lm 0.32.
+  `dynamic_quant` are the two ways, and both are on the MLX tools page. **GGUF → MLX is
+  still not possible**: mlx-lm reads a Hugging Face model or an MLX folder, and the one
+  `--gguf-path` flag it has is an export destination —
+  `mlx_lm.fuse --export-gguf` writes GGUF for llama, mistral and mixtral only.
 - **Text models only.** `mlx-lm` serves text generation; speech and vision
   conversions belong to `mlx-audio` and `mlx-vlm`, and the catalogue does not offer
   them.
@@ -933,6 +978,7 @@ area, wired in `routes/index.ts`; the server entry is a thin transport shell.
 | `GET /api/hub/sources` · `/api/hub/search` · `/api/hub/trending` · `/api/hub/repo` | HF, ModelScope, CivitAI, Ollama, direct URL |
 | `GET /api/ollama/status` · `/api/ollama/models` · `/api/ollama/show` | read a local Ollama install |
 | `GET /api/downloads` · `POST /api/downloads` · `POST /api/downloads/:id/cancel` | resumable GGUF downloads |
+| `GET /api/recommend` | the small model this machine should start with, offered when the library is empty; sizes come from the plan endpoints |
 
 ### MLX (Apple silicon)
 
@@ -940,6 +986,7 @@ area, wired in `routes/index.ts`; the server entry is a thin transport shell.
 |---|---|
 | `GET /api/mlx/status` | support, runtime, paths and the MLX models on disk — one call for the card |
 | `POST /api/mlx/install` | build or update Osama's own `mlx-lm` environment (progress on `/api/events`) |
+| `POST /api/mlx/extras` | add the extras two MLX tools need (`lm-eval`, `datasets`) to that same environment |
 | `GET /api/mlx/models` · `GET /api/mlx/model?dir=` | MLX model directories, and one model's facts |
 | `GET /api/mlx/sources` · `GET /api/mlx/search?q=&source=` | the catalogues, and a search over one of them |
 | `GET /api/mlx/repo?ref=` · `POST /api/mlx/download` | what fetching a repo costs, then fetch the whole repo (resumable) |
@@ -969,6 +1016,7 @@ area, wired in `routes/index.ts`; the server entry is a thin transport shell.
 | `POST /api/agent/approve/:id` · `POST /api/agent/answer/:id` | resume a parked turn |
 | `POST /api/agent/compact` | compact the context on demand |
 | `GET /api/agent/tools` | the tool registry |
+| `GET /api/agent/toolcalls?baseUrl=` | what that server can enforce for guided tool calls — a grammar on llama.cpp, a request elsewhere |
 | `GET\|POST /api/agent/context` | exact context-window measurement via the model's own tokenizer |
 | `GET /api/agent/todos` · `/api/agent/artifacts` · `/api/agent/skills` | agent state the sidebar shows |
 | `GET /api/agent/artifacts/preview` · `/dir` · `POST …/open` · `POST …/reveal` | the Artifacts browser |
@@ -1088,9 +1136,10 @@ principles and the verified end-to-end run.
   builds; hardware probe and accelerator recommendation.
 - **Model library** — hub search across five sources, resumable downloads, and
   GGUF cards read straight from the header.
-- **All fourteen binaries** — every tool the release ships has a front-end
-  generated from the single flag catalogue, plus GGUF metadata editing and LoRA
-  merging with verification.
+- **Sixteen llama.cpp front-ends** — every binary of the release that can be driven has
+  one, generated from the single flag catalogue, plus GGUF metadata editing and LoRA
+  merging with verification. `GET /api/tools` lists them; `GET /api/engine` reports how
+  many of the tools a build actually ships are drivable.
 - **Chat and Agent modes** — a plain chat app by default; an agent that reads,
   writes and runs commands inside a jailed workspace, with approvals and a live
   view of what it is doing.
@@ -1101,9 +1150,9 @@ principles and the verified end-to-end run.
   never lists a half-download, and a refusal with a reason for anything the runtime
   cannot load.
 - **MLX conversion and quantisation** — `convert` (quantising in the same pass, with
-  mixed-precision recipes) and `dynamic_quant` (per-layer bits for a target BPW) as
-  two entries in the tool catalogue, so the forms, the streaming log and the result
-  card come from the same machinery every llama.cpp tool uses. Every flag they emit
+  mixed-precision recipes) and `dynamic_quant` (per-layer bits for a target BPW) as two
+  of the MLX page's tabs, so the forms, the streaming log and the result card come from
+  the same machinery every llama.cpp tool uses. Every flag they emit
   was checked against the installed runtime's own `--help`.
 - **The rest of mlx-lm** — seven MLX tabs in the one tool catalogue: `fuse` (a trained
   adapter folded into its base model, with an optional GGUF export), `evaluate` and
@@ -1125,6 +1174,11 @@ principles and the verified end-to-end run.
   `jail`, `fs`, `net`, `state`, `scheduler`, `dispatch`, `index` — moved region by region
   with a re-exporting index, so nothing that imported it had to change. The stale
   `core/src/commands.ts` the earlier split left behind is gone too.
+- **A model on first run** — an empty library no longer just tells you to go and find one.
+  The Dashboard offers the smallest model that suits the machine (MLX where it can run,
+  llama.cpp otherwise), every size read from the Hub's own plan endpoint rather than
+  estimated, and a download that lands in the library through the machinery everything else
+  uses. It stops offering once a model exists.
 - **Desktop shell** — Tauri 2 configuration for macOS, Linux and Windows.
 
 ### Next
@@ -1138,9 +1192,6 @@ principles and the verified end-to-end run.
   hours long, so it wants a stop control and a resumable checkpoint story that the
   one-shot runner deliberately does not have, and its `--config` YAML is a second input
   language on top of the flags.
-- **A model on first run.** Osama ships no weights and makes you find them.
-  A guided first-run that offers a small recommended model for your hardware
-  would close the biggest gap between "installed" and "answering".
 - **Tool calling beyond small models.** Guided mode removes the *malformed* call on
   llama.cpp; what no grammar can fix is the *choice*. A 3B model still reaches for a tool
   on a turn that needs none, and constraining the syntax does not constrain the judgement.
